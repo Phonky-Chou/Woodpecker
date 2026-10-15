@@ -17,12 +17,12 @@ node tools/build.mjs
 node tools/test-naming.mjs        # 16 项 命名引擎（界面"说人话"）
 node tools/test-unit.mjs         # 32 项
 node tools/test-dom-smoke.mjs    # 26 项
-node tools/test-app-wiring.mjs   # 16 项（应用级接线 + 工具条行为，最关键）
+node tools/test-app-wiring.mjs   # 17 项（应用级接线 + 工具条行为，最关键）
 node tools/test-bundle.mjs       # 12 项
 ```
 
-合计 **102 项，0 失败**。改了 `src/` 必须重新构建，否则 `test-bundle` 会直接报"产物过期"。
-另有页面内自检 **25 项**（浏览器里点「更多 ▾ → 🧪 页面内自检」）。
+合计 **103 项，0 失败**。改了 `src/` 必须重新构建，否则 `test-bundle` 会直接报"产物过期"。
+另有页面内自检 **26 项**（浏览器里点「更多 ▾ → 🧪 页面内自检」）。
 
 ### A-1. 界面语言优化（`test-naming.mjs` 16 项 + `test-app-wiring.mjs` 5 项）
 

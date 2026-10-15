@@ -167,25 +167,14 @@ export class Picker {
 
   onPointerMove(e) {
     if (!this.enabled) return;
+    // 按住期间（候选界面已打开）：层级完全由**选择界面**驱动 ——
+    // 鼠标滑到哪个选项就高亮哪个（由父窗口的 mouseover 处理），
+    // 指针在页面上移动不再改变层级。
+    // 否则用户想伸手去够选项时，高亮会跟着页面元素乱跳，根本无法稳定选中想改的那一层。
+    if (this.bubble) return;
     const now = e.timeStamp || Date.now();
     if (now - this.lastMoveTs < 16) return; // 约 60fps，别把 iframe 打满
     this.lastMoveTs = now;
-    if (this.bubble) {
-      // 泡泡打开时：移动只在链内切换候选，不重开
-      const chain = this.bubble.chain;
-      const hovered = chain.findIndex((c) => {
-        const el = this.anchor.resolve(c.pid);
-        if (!el) return false;
-        const r = el.getBoundingClientRect();
-        return e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom;
-      });
-      this.emit({
-        type: 'bubble-move',
-        point: { x: e.clientX, y: e.clientY },
-        bubble: { index: hovered === -1 ? this.bubble.index : hovered },
-      });
-      return;
-    }
     const hit = this.doc.elementFromPoint(e.clientX, e.clientY);
     if (!hit || isEditorNode(hit)) return;
     const pid = this.anchor.ensure(hit);

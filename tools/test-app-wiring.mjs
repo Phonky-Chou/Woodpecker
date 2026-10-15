@@ -469,6 +469,45 @@ test('越界且自愈仍失败时，给出"改选外层容器重试"的出路', 
   assert.ok(calls > before, `点击出路按钮后应改选外层并重新发起（${before} → ${calls}）`);
 });
 
+test('按住时层级由选择界面驱动，不跟随页面元素乱跳', async () => {
+  const app = await bootApp();
+  const doc = app.frame.contentDocument;
+  const h1 = doc.querySelector('h1');
+  doc.elementFromPointResult = h1;
+  const box = h1.getBoundingClientRect();
+  const at = { clientX: Math.round(box.x) + 4, clientY: Math.round(box.y) + 4, button: 0 };
+
+  doc.dispatchEvent({ type: 'pointerdown', ...at });
+  await sleep(20);
+  assert.ok(app.overlay.bubble, '按住应弹出候选界面');
+  assert.equal(app.overlay.currentIndex, 0, '初始应是最内层（鼠标按下的那一层）');
+  const firstLabel = app.overlay.hl.querySelector('.z-hl-tag').textContent;
+
+  // 指针在**页面上**移动到别的元素（这里是 body）→ 层级不许变
+  doc.elementFromPointResult = doc.body;
+  doc.dispatchEvent({ type: 'pointermove', clientX: 6, clientY: 6, button: 0 });
+  await sleep(30);
+  assert.equal(app.overlay.currentIndex, 0, '按住期间指针在页面上移动，不应改变层级');
+  assert.equal(app.overlay.hl.querySelector('.z-hl-tag').textContent, firstLabel, '预览高亮不应跟着页面跳');
+
+  // 滑到选择界面的第 2 项 → 这一项要高亮，预览也跟着换
+  const rows = app.overlay.bubble.querySelectorAll('[data-chain]');
+  assert.ok(rows.length >= 2, '至少要有两层候选');
+  rows[1].dispatchEvent({ type: 'mouseover' });
+  await sleep(30);
+  assert.equal(app.overlay.currentIndex, 1, '滑到第 2 项应切到第 2 层');
+  assert.ok(rows[1].classList.contains('on'), '第 2 项要有高亮样式');
+  assert.ok(rows[0] && !rows[0].classList.contains('on'), '第 1 项应取消高亮');
+  const secondName = app.overlay.chain[1].name.slice(0, 4);
+  const label = app.overlay.hl.querySelector('.z-hl-tag').textContent;
+  assert.ok(label.includes(secondName), `预览高亮应换成第 2 项（${secondName}），实际：${label}`);
+
+  // 松手后选中的应该是刚才高亮的那一层
+  doc.dispatchEvent({ type: 'pointerup', clientX: 6, clientY: 6, button: 0 });
+  await sleep(40);
+  assert.equal(app.selection?.name, app.overlay.chain[1].name, '松开应确定高亮的那一层');
+});
+
 test.after?.(() => {});
 
 process.on('exit', () => cleanupDomShim());

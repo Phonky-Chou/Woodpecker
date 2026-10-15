@@ -137,7 +137,7 @@ export class Overlay {
       .join('');
     el.innerHTML =
       `<div class="z-bubble-chain z-scroll">${chainHtml}</div>` +
-      `<div class="z-bubble-hint">↑↓ 换层级<br>Enter 选中<br>Esc 取消<br>双击可改名</div>` +
+      `<div class="z-bubble-hint">滑到某项即高亮<br>↑↓ 换层级<br>Esc 取消<br>双击可改名</div>` +
       `<div style="width:1px;height:52px;background:var(--z-border)"></div>` +
       `<div class="z-bubble-actions" style="display:flex;gap:4px;align-items:center">${actHtml}</div>`;
     this.container.appendChild(el);
@@ -163,8 +163,11 @@ export class Overlay {
       if (this.bubble?.classList.contains('stuck')) return;
       this.onAction?.({ type: 'bubble-hover', chain: this.chain ?? chain, index: this.currentIndex ?? index });
     });
+    // 在弹层上松开鼠标：iframe 收不到这个事件，由父窗口自己把状态标成"已选中"
+    el.addEventListener('mouseup', () => this.markReleased());
 
-    // R2.4：在弹层里 hover 某一项时，预览区实时高亮对应元素
+    // R2.4：在弹层里 hover 某一项时，预览区实时高亮对应元素，
+    // 并把 index 回传给 iframe 里的 picker（松手时由它执行选中）
     el.addEventListener('mouseover', (e) => {
       const chainBtn = e.target.closest('[data-chain]');
       if (!chainBtn) return;
@@ -173,6 +176,10 @@ export class Overlay {
       if (!c) return;
       this.setBubbleIndex(i);
       this.showHighlight(c, { label: `${c.icon ?? ''} ${c.name ?? ''} · ${c.box?.w ?? 0}×${c.box?.h ?? 0}` });
+      if (this.currentIndex !== this.lastSyncedIndex) {
+        this.lastSyncedIndex = this.currentIndex;
+        this.onAction?.({ type: 'bubble-index', index: this.currentIndex });
+      }
     });
 
     // R5：双击弹层项即可重命名
@@ -187,6 +194,7 @@ export class Overlay {
     });
 
     this.currentIndex = index;
+    this.lastSyncedIndex = -1;
     this.chain = chain;
     this.positionBubble(point, pts);
     return el;
@@ -225,6 +233,7 @@ export class Overlay {
       this.bubble.remove();
       this.bubble = null;
       this.currentIndex = 0;
+      this.lastSyncedIndex = -1; // 新弹层要重新同步，别沿用上一个的
     }
   }
 
@@ -235,14 +244,13 @@ export class Overlay {
    * 主功能等于不可用。现在松开 = 选中 + 工具条常驻，用户可以从容点按钮。
    * 位置锚定到选中元素的下方（贴边时 positionBubble 会自动翻转）。
    */
-  stickBubble({ chain, index = 0 }) {
+  stickBubble({ chain, index = 0, released = true }) {
     if (!this.bubble) return false;
     this.bubble.classList.add('stuck');
     this.chain = chain ?? this.chain;
     this.setBubbleIndex(index);
     const c = this.chain?.[index];
-    const hint = this.bubble.querySelector('.z-bubble-hint');
-    if (hint) hint.innerHTML = '已选中<br>↑↓ 换层级<br>Esc 关闭';
+    this.setHint(released ? 'released' : 'holding');
     // 加一个显眼的关闭按钮（工具条状态下的出口）
     const actions = this.bubble.querySelector('.z-bubble-actions');
     if (actions && !actions.querySelector('[data-action="close"]')) {
@@ -260,6 +268,22 @@ export class Overlay {
       this.positionBubbleAt(anchorPoint);
     }
     return true;
+  }
+
+  /** 提示文案随状态变化：还在按住 ≠ 已选中 */
+  setHint(state) {
+    const hint = this.bubble?.querySelector('.z-bubble-hint');
+    if (!hint) return;
+    this.hintState = state;
+    hint.innerHTML =
+      state === 'released'
+        ? '已选中<br>↑↓ 换层级<br>Esc 关闭'
+        : '滑到某项即高亮<br>↑↓ 换层级<br>松开确定';
+  }
+
+  /** 鼠标在弹层上松开：还没标记过"已选中"就补上（浏览器不会把 iframe 外的事件传给 iframe） */
+  markReleased() {
+    if (this.bubble && this.hintState === 'holding') this.setHint('released');
   }
 
   /** 按"覆盖层坐标"摆弹层（stickBubble 用，point 已经是最终坐标） */

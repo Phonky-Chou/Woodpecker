@@ -103,6 +103,18 @@ export function installBridge({ win, doc, token }) {
 
     setMode: ({ mode } = {}) => ({ mode: picker.setMode(mode) }),
 
+    /**
+     * 同步"当前高亮的层级"。
+     * 按住期间层级由父窗口的选择界面驱动，而真正在松手时执行选中动作的是 iframe 里的 picker，
+     * 所以父窗口每次切换高亮都要把 index 回传给 picker —— 否则松手选中的还是最初那一层。
+     */
+    setBubbleIndex: ({ index } = {}) => {
+      if (!picker.bubble) return { index: null };
+      const max = picker.bubble.chain.length - 1;
+      picker.bubble.index = Math.max(0, Math.min(Number(index) || 0, max));
+      return { index: picker.bubble.index };
+    },
+
     /** 下发用户自定义命名（R5）：覆盖弹层 / 面包屑 / 面板 / AI 上下文 */
     setNames: ({ names } = {}) => {
       customNames = names && typeof names === 'object' ? { ...names } : {};

@@ -66,7 +66,7 @@ node tools/serve.mjs                 # 打开 http://127.0.0.1:5188
 "已选中工具条"，可以慢慢点 `✦ 让 AI 改这块` / `✎ 改名` / `复制选择器` / `✕`；
 按住时把鼠标移到工具条上它会立刻"钉住"不再乱动。按 `Esc` 或点 `✕` 收起。
 
-**一键自检**：顶栏 **更多 ▾ → 🧪 页面内自检** 会在真实浏览器里跑完整套验收清单（25 项），结果弹窗展示，
+**一键自检**：顶栏 **更多 ▾ → 🧪 页面内自检** 会在真实浏览器里跑完整套验收清单（26 项），结果弹窗展示，
 跑完自动把工作区还原到你自检前的那一版。**这是最推荐的第一次验收动作。**
 
 ---
@@ -136,7 +136,7 @@ zhidaiqi/
 │   ├── ui.mjs                     对话、预览卡、版本面板、设置
 │   ├── app.mjs                    主编排
 │   ├── naming.mjs                 人话命名引擎（弹层/面包屑/面板/AI 上下文共用）
-│   ├── selftest.mjs               页面内自检套件（25 项）
+│   ├── selftest.mjs               页面内自检套件（26 项）
 │   ├── app.css                    外壳样式（不会写进导出）
 │   └── sample.html                示例页
 ├── tools/
@@ -145,7 +145,7 @@ zhidaiqi/
 │   ├── test-naming.mjs            16 项命名引擎测试
 │   ├── test-unit.mjs              32 项纯逻辑单测
 │   ├── test-dom-smoke.mjs         26 项最小 DOM 真实链路烟测
-│   ├── test-app-wiring.mjs        16 项应用级接线测试（在 Node 里跑真正的 EditorApp）
+│   ├── test-app-wiring.mjs        17 项应用级接线测试（在 Node 里跑真正的 EditorApp）
 │   ├── test-bundle.mjs            12 项打包产物 + 接线契约校验
 │   ├── dom-shim.mjs               测试用的极小 DOM（含 iframe realm，不进产物）
 │   └── test-e2e.mjs               可选：真浏览器端到端（需要能起浏览器）
@@ -163,12 +163,12 @@ node tools/build.mjs --watch    # 改源码自动重新构建
 node tools/test-naming.mjs      # 16 项 命名引擎（人话名 / 图标 / 快捷词）
 node tools/test-unit.mjs        # 32 项纯逻辑
 node tools/test-dom-smoke.mjs   # 26 项真实 DOM 链路
-node tools/test-app-wiring.mjs  # 16 项应用级接线（真跑 EditorApp + iframe realm）
+node tools/test-app-wiring.mjs  # 17 项应用级接线（真跑 EditorApp + iframe realm）
 node tools/test-bundle.mjs      # 12 项打包产物 + 接线契约
 node tools/serve.mjs            # 开发服务（含真实模型代理）
 ```
 
-合计 **102 项**。页面内自检另有 **25 项**（顶栏「更多 ▾ → 🧪 页面内自检」）。
+合计 **103 项**。页面内自检另有 **26 项**（顶栏「更多 ▾ → 🧪 页面内自检」）。
 
 ## 快捷键
 
@@ -186,7 +186,7 @@ node tools/serve.mjs            # 开发服务（含真实模型代理）
 
 - **像素级渲染与真实 CSS 级联只能在浏览器里证明。** 开发环境的进程沙箱不允许起浏览器，
   所以自动化的真浏览器端到端（`tools/test-e2e.mjs`）在本机没能跑通；替代方案是
-  **页面内自检**（更多 ▾ → 🧪 页面内自检，24 项）+ Node 里的最小 DOM 真实链路烟测（25 项）+ 应用级接线测试（16 项）。
+  **页面内自检**（更多 ▾ → 🧪 页面内自检，26 项）+ Node 里的最小 DOM 真实链路烟测（26 项）+ 应用级接线测试（17 项）。
   前者请在浏览器里点一下确认，那是最有说服力的一次验收。
 - **app ↔ bridge 的接线正确性由契约测试保证**（`test-bundle.mjs` 会检查 `app.mjs` 调用的每个
   `rpc('op')` 是否真的存在于桥的能力表）。这类错误在纯 Node 测试里不可见——

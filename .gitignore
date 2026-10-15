@@ -8,3 +8,6 @@ Thumbs.db
 
 # 临时探针脚本（开发时用于定位问题的 throwaway，不应入库）
 tools/_*.mjs
+
+# 临时提交信息文件（PowerShell 没有 heredoc，只能用文件传给 git -F）
+_commitmsg*.txt

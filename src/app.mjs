@@ -771,11 +771,16 @@ export class EditorApp {
       this.startRename({ pid: evt.pid, name: evt.name });
       return;
     }
-    // 按住时把指针移到弹层上 → 钉住（不再跟随指针换层级）
+    // 选择界面里切换高亮 → 让 iframe 里的 picker 也记住，松手时才会选中这一层
+    if (evt.type === 'bubble-index') {
+      this.rpc('setBubbleIndex', { index: evt.index }).catch(() => {});
+      return;
+    }
+    // 按住时把指针移到弹层上 → 钉住（不再跟随指针换层级）；此时还没松手，提示保持"按住"状态
     if (evt.type === 'bubble-hover') {
       if (!this.bubbleStuck) {
         this.bubbleStuck = true;
-        this.overlay.stickBubble({ chain: evt.chain, index: evt.index });
+        this.overlay.stickBubble({ chain: evt.chain, index: evt.index, released: false });
       }
       return;
     }

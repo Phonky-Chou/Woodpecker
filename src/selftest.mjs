@@ -380,6 +380,55 @@ export async function runSelfTest(app, { log = () => {} } = {}) {
       }
     }),
 
+    want('按住时高亮由选择界面驱动，不跟随页面乱跳', async () => {
+      const doc = t().doc;
+      const win = t().win;
+      await t().selectCss(SELECTOR);
+      const el = doc.querySelector(SELECTOR);
+      const r = el.getBoundingClientRect();
+      const at = {
+        bubbles: true,
+        cancelable: true,
+        button: 0,
+        clientX: Math.round(r.x) + Math.max(2, Math.min(6, r.width / 4)),
+        clientY: Math.round(r.y) + Math.max(2, Math.min(6, r.height / 4)),
+      };
+      doc.dispatchEvent(new win.PointerEvent('pointerdown', at));
+      await sleep(30);
+      if (!app.overlay.bubble) {
+        check('按住时高亮由选择界面驱动，不跟随页面乱跳', false, '候选界面没弹出来');
+        return;
+      }
+      const initial = app.overlay.currentIndex;
+      const initialLabel = app.overlay.hl.querySelector('.z-hl-tag')?.textContent ?? '';
+      // 指针在页面上移动（换个位置）
+      doc.dispatchEvent(new win.PointerEvent('pointermove', { ...at, clientX: 3, clientY: 3 }));
+      await sleep(40);
+      const afterMove = app.overlay.currentIndex;
+      // 滑到选择界面的第 2 项
+      const rows = app.overlay.bubble.querySelectorAll('[data-chain]');
+      let afterHover = -1;
+      let hoverHighlighted = false;
+      if (rows.length >= 2) {
+        rows[1].dispatchEvent(new win.MouseEvent('mouseover', { bubbles: true }));
+        await sleep(40);
+        afterHover = app.overlay.currentIndex;
+        hoverHighlighted = rows[1].classList.contains('on');
+      }
+      const pageDidNotMove = afterMove === initial;
+      const bubbleDrives = rows.length < 2 || (afterHover === 1 && hoverHighlighted);
+      // 清理：结束这次按住，不留下工具条
+      doc.dispatchEvent(new win.PointerEvent('pointerup', at));
+      await sleep(40);
+      app.bubbleStuck = false;
+      app.overlay.closeBubble();
+      check(
+        '按住时高亮由选择界面驱动，不跟随页面乱跳',
+        pageDidNotMove && bubbleDrives,
+        `页面移动后层级不变=${pageDidNotMove}(${initial}→${afterMove}) 滑到第2项后=${afterHover} 该项高亮=${hoverHighlighted} 初始高亮=${initialLabel.slice(0, 12)}`,
+      );
+    }),
+
     want('版本历史与预览卡渲染正常', async () => {
       app.switchTab('versions');
       const rows = document.querySelectorAll('.z-ver').length;
