@@ -167,11 +167,17 @@ export class Picker {
 
   onPointerMove(e) {
     if (!this.enabled) return;
-    // 按住期间（候选界面已打开）：层级完全由**选择界面**驱动 ——
-    // 鼠标滑到哪个选项就高亮哪个（由父窗口的 mouseover 处理），
-    // 指针在页面上移动不再改变层级。
-    // 否则用户想伸手去够选项时，高亮会跟着页面元素乱跳，根本无法稳定选中想改的那一层。
-    if (this.bubble) return;
+    // 按住期间（候选界面已打开）：**不用页面命中测试改层级**，但要把指针坐标继续回报。
+    // 为什么还要回报坐标：在 iframe 里按下后拖到外面时，Chrome 会把指针事件继续投递给 iframe
+    // （跨 frame 拖拽的捕获行为），父窗口收不到自己的 pointerover。
+    // 所以父窗口需要用这份坐标自己做"是否落在某个选项行上"的命中测试。
+    if (this.bubble) {
+      const now = e.timeStamp || Date.now();
+      if (now - this.lastMoveTs < 16) return;
+      this.lastMoveTs = now;
+      this.emit({ type: 'bubble-pointer', point: { x: e.clientX, y: e.clientY } });
+      return;
+    }
     const now = e.timeStamp || Date.now();
     if (now - this.lastMoveTs < 16) return; // 约 60fps，别把 iframe 打满
     this.lastMoveTs = now;

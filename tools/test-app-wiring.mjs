@@ -370,21 +370,29 @@ test('按住时把指针移到选择界面上：弹层不位移，滑到哪一�
   assert.deepEqual(posAfter, posBefore, '按住期间指针碰到弹层，弹层不允许位移');
   assert.equal(bubble.classList.contains('stuck'), false, '还没松手，不该变成"已选中"工具条');
 
-  // 在选项上滑动：滑到哪一项，哪一项高亮，预览也跟着换
+  // 在选项上滑动：滑到哪一项，哪一项高亮，预览也跟着换。
+  // ⚠ 这里**只派发 pointerover**（不派发 mouseover）—— 因为真浏览器里
+  // 指代器在 pointerdown 里 preventDefault() 之后，该指针序列的兼容鼠标事件会被抑制，
+  // 按住期间只有 pointer 事件能到达弹层。这条断言就是"按住时滑动没反应"的回归测试。
   const rows = bubble.querySelectorAll('[data-chain]');
   assert.ok(rows.length >= 3, `至少要有 3 层候选，实际 ${rows.length}`);
   const labels = [];
   for (const i of [1, 2, 1]) {
-    rows[i].dispatchEvent({ type: 'mouseover' });
+    rows[i].dispatchEvent({ type: 'pointerover' });
     await sleep(20);
-    assert.equal(app.overlay.currentIndex, i, `滑到第 ${i} 项应切到该层`);
+    assert.equal(app.overlay.currentIndex, i, `按住时滑到第 ${i} 项应切到该层（只靠 pointer 事件）`);
     assert.ok(rows[i].classList.contains('on'), `第 ${i} 项应高亮`);
     labels.push(app.overlay.hl.querySelector('.z-hl-tag').textContent);
   }
   assert.notEqual(labels[0], labels[1], '不同选项应给出不同的预览高亮');
 
+  // 普通 hover（松手后、或没有按住时）走 mouseover 也要生效（双保险）
+  rows[0].dispatchEvent({ type: 'mouseover' });
+  await sleep(20);
+  assert.equal(app.overlay.currentIndex, 0, 'mouseover 路径同样要生效');
+
   // 指针离开 iframe（移向选择界面）时，不能重画"旧选中"把选项高亮盖掉
-  rows[1].dispatchEvent({ type: 'mouseover' });
+  rows[1].dispatchEvent({ type: 'pointerover' });
   await sleep(20);
   const labelBeforeLeave = app.overlay.hl.querySelector('.z-hl-tag').textContent;
   doc.dispatchEvent({ type: 'mouseleave' });
@@ -395,10 +403,10 @@ test('按住时把指针移到选择界面上：弹层不位移，滑到哪一�
     '鼠标离开预览区时，选项的高亮不许被"旧选中"覆盖',
   );
 
-  // 在弹层上直接松手：应确认当前高亮的那一层，并变成常驻工具条
-  rows[2].dispatchEvent({ type: 'mouseover' });
+  // 在弹层上直接松手：同样只派发 pointerup（mouseup 在按住序列里会被抑制）
+  rows[2].dispatchEvent({ type: 'pointerover' });
   await sleep(20);
-  bubble.dispatchEvent({ type: 'mouseup' });
+  bubble.dispatchEvent({ type: 'pointerup' });
   await sleep(80);
   assert.equal(app.selection?.name, app.overlay.chain[2].name, '在弹层上松手应确认高亮的那一层');
   assert.equal(app.bubbleStuck, true, '松手后应变成常驻工具条');
@@ -531,6 +539,43 @@ test('按住时层级由选择界面驱动，不跟随页面元素乱跳', async
   doc.dispatchEvent({ type: 'pointerup', clientX: 6, clientY: 6, button: 0 });
   await sleep(40);
   assert.equal(app.selection?.name, app.overlay.chain[1].name, '松开应确定高亮的那一层');
+});
+
+test('按住时即使 iframe 捕获了指针事件，滑到选项上也要高亮（坐标回传通道）', async () => {
+  const app = await bootApp();
+  const doc = app.frame.contentDocument;
+  const h1 = doc.querySelector('h1');
+  doc.elementFromPointResult = h1;
+  const box = h1.getBoundingClientRect();
+  const at = { clientX: Math.round(box.x) + 4, clientY: Math.round(box.y) + 4, button: 0 };
+
+  doc.dispatchEvent({ type: 'pointerdown', ...at });
+  await sleep(20);
+  const bubble = app.overlay.bubble;
+  assert.ok(bubble, '按住应弹出');
+  const rows = bubble.querySelectorAll('[data-chain]');
+  assert.ok(rows.length >= 2, '至少两层候选');
+
+  // 造一个确定的布局（shim 没有排版引擎，这里显式给矩形），
+  // 模拟"在 iframe 里按下后拖到弹层选项上"：父窗口**收不到自己的 hover 事件**，
+  // 只能靠 iframe 回传的指针坐标来判断落在哪一项。
+  app.frameWrap._rectOverride = { left: 0, top: 0, width: 800, height: 600, x: 0, y: 0, right: 800, bottom: 600 };
+  app.frame._rectOverride = { left: 10, top: 50, width: 780, height: 540, x: 10, y: 50, right: 790, bottom: 590 };
+  rows[0]._rectOverride = { left: 30, top: 70, width: 220, height: 26, x: 30, y: 70, right: 250, bottom: 96 };
+  rows[1]._rectOverride = { left: 30, top: 96, width: 220, height: 26, x: 30, y: 96, right: 250, bottom: 122 };
+  if (rows[2]) rows[2]._rectOverride = { left: 30, top: 122, width: 220, height: 26, x: 30, y: 122, right: 250, bottom: 148 };
+
+  // 选项行 1 的中心点 → 换算成 iframe 视口坐标（offset = frame - container = (10, 50)）
+  const targetRow = 1;
+  const r1 = rows[targetRow]._rectOverride;
+  const iframePoint = { x: r1.left + 10 - 10, y: r1.top + 12 - 50 };
+  doc.dispatchEvent({ type: 'pointermove', clientX: iframePoint.x, clientY: iframePoint.y, button: 0 });
+  await sleep(40);
+
+  assert.equal(app.overlay.currentIndex, targetRow, '坐标落在第 2 项上就该切到第 2 项');
+  assert.ok(rows[targetRow].classList.contains('on'), '第 2 项要高亮');
+  const bridge = app.frame.contentWindow.__zBridge;
+  assert.equal(bridge.picker.bubble?.index, targetRow, 'iframe 里的 picker 也要同步到这一层（松手才选得对）');
 });
 
 test.after?.(() => {});

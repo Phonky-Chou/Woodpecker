@@ -26,6 +26,8 @@ function ensurePickerStyle(doc) {
   style.setAttribute('data-z-chrome', 'picker');
   style.textContent = [
     'html.z-picking, html.z-picking * { cursor: crosshair !important; }',
+    // 既然我们在 pointerdown 里 preventDefault 了（防拖拽选中），顺手也禁掉文本选择
+    'html.z-picking { user-select: none !important; -webkit-user-select: none !important; }',
     '.picker-selected { outline: 2px solid rgba(76,141,255,.9) !important; outline-offset: 1px !important; }',
     '.z-preview-flash { animation: zflash 1.1s ease-out 1; }',
     '@keyframes zflash { 0% { background-color: rgba(52,211,153,.28); } 100% { background-color: transparent; } }',

@@ -160,22 +160,22 @@ export class Overlay {
     // 按住期间把指针移到弹层上：**保持原位、什么都不做**。
     // 之前这里会"钉住"并顺带把弹层挪到元素右下角 —— 结果用户刚碰到它就被弹走，
     // 根本没法在选项上滑动。现在按住期间弹层不动，指针滑到哪一项就高亮哪一项。
-    el.addEventListener('mouseenter', () => {
+    el.addEventListener('pointerenter', () => {
       this.hintState = this.hintState ?? 'holding';
     });
-    // 在弹层上松开鼠标：iframe 收不到这个事件，由父窗口自己确认选中 + 变工具条
-    el.addEventListener('mouseup', () => {
-      this.markReleased();
-      this.onAction?.({ type: 'bubble-commit', chain: this.chain ?? chain, index: this.currentIndex ?? index });
-    });
 
-    // R2.4：在弹层里 hover 某一项时，预览区实时高亮对应元素，
-    // 并把 index 回传给 iframe 里的 picker（松手时由它执行选中）
-    el.addEventListener('mouseover', (e) => {
-      const chainBtn = e.target.closest('[data-chain]');
-      if (!chainBtn) return;
-      const i = Number(chainBtn.dataset.chain);
-      const c = chain[i];
+    /**
+     * 滑到某项 → 高亮该项 + 预览区对应元素。
+     *
+     * 两条通道必须都接上：
+     *  ① 父窗口自己的 pointerover/mouseover —— 指针没被 iframe 捕获时走这条；
+     *  ② iframe 回传的指针坐标（hoverAtPoint）—— 在 iframe 里按下后拖到外面时，
+     *     Chrome 会把指针事件继续投递给 iframe，父窗口收不到自己的 hover 事件；
+     *     而且指代器在 pointerdown 里 preventDefault() 后，兼容鼠标事件（mouseover）
+     *     在该指针序列里被抑制 —— 只靠 mouseover 会出现"按住时滑选项完全没反应"。
+     */
+    this.applyRowIndex = (i) => {
+      const c = (this.chain ?? chain)[i];
       if (!c) return;
       this.setBubbleIndex(i);
       this.showHighlight(c, { label: `${c.icon ?? ''} ${c.name ?? ''} · ${c.box?.w ?? 0}×${c.box?.h ?? 0}` });
@@ -183,7 +183,25 @@ export class Overlay {
         this.lastSyncedIndex = this.currentIndex;
         this.onAction?.({ type: 'bubble-index', index: this.currentIndex });
       }
-    });
+    };
+    const onRowHover = (e) => {
+      const chainBtn = e.target?.closest?.('[data-chain]');
+      if (!chainBtn) return;
+      this.applyRowIndex(Number(chainBtn.dataset.chain));
+    };
+    el.addEventListener('pointerover', onRowHover);
+    el.addEventListener('mouseover', onRowHover);
+
+    // 在弹层上松开鼠标：iframe 收不到这个事件，由父窗口自己确认选中 + 变工具条。
+    // 同样优先用 pointerup（不受 pointerdown 取消的影响）。
+    const onRelease = () => {
+      if (this.releaseHandled) return;
+      this.releaseHandled = true;
+      this.markReleased();
+      this.onAction?.({ type: 'bubble-commit', chain: this.chain ?? chain, index: this.currentIndex ?? index });
+    };
+    el.addEventListener('pointerup', onRelease);
+    el.addEventListener('mouseup', onRelease);
 
     // R5：双击弹层项即可重命名
     el.addEventListener('dblclick', (e) => {
@@ -198,6 +216,7 @@ export class Overlay {
 
     this.currentIndex = index;
     this.lastSyncedIndex = -1;
+    this.releaseHandled = false;
     this.chain = chain;
     this.positionBubble(point, pts);
     return el;
@@ -237,6 +256,7 @@ export class Overlay {
       this.bubble = null;
       this.currentIndex = 0;
       this.lastSyncedIndex = -1; // 新弹层要重新同步，别沿用上一个的
+      this.releaseHandled = false;
     }
   }
 
@@ -287,6 +307,31 @@ export class Overlay {
   /** 鼠标在弹层上松开：还没标记过"已选中"就补上（浏览器不会把 iframe 外的事件传给 iframe） */
   markReleased() {
     if (this.bubble && this.hintState === 'holding') this.setHint('released');
+  }
+
+  /**
+   * 用 iframe 回传的指针坐标（iframe 视口坐标系）做命中测试：
+   * 指针落在哪个候选项上就切到哪一项。
+   * 这条通道专治"在 iframe 里按下后拖到外面、事件仍被 iframe 捕获"的情况。
+   */
+  hoverAtPoint(iframePoint) {
+    if (!this.bubble || !iframePoint) return false;
+    const rows = [...this.bubble.querySelectorAll('[data-chain]')];
+    if (!rows.length) return false;
+    const o = this.offset();
+    const cRect = this.container.getBoundingClientRect();
+    const x = o.x + iframePoint.x;
+    const y = o.y + iframePoint.y;
+    for (let i = 0; i < rows.length; i++) {
+      const r = rows[i].getBoundingClientRect();
+      const left = r.left - cRect.left;
+      const top = r.top - cRect.top;
+      if (x >= left && x <= left + r.width && y >= top && y <= top + r.height) {
+        if (i !== this.currentIndex) this.applyRowIndex?.(i);
+        return true;
+      }
+    }
+    return false;
   }
 
   /** 按"覆盖层坐标"摆弹层（stickBubble 用，point 已经是最终坐标） */

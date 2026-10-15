@@ -687,6 +687,12 @@ export class EditorApp {
       case 'bubble-move':
         if (payload.bubble) this.overlay.setBubbleIndex(payload.bubble.index);
         break;
+      case 'bubble-pointer':
+        // 按住时 iframe 仍在上报指针坐标：由父窗口自己判断落在哪个选项上。
+        // （跨 frame 拖拽时事件会被 iframe 捕获、且兼容鼠标事件被 preventDefault 抑制，
+        //   所以这条通道是"按住后滑选项没反应"的正解。）
+        this.overlay.hoverAtPoint(payload.point);
+        break;
       case 'bubble-pick':
         // 松开 = 选中 + 把弹层留在页面上当工具条（否则「让 AI 改这块」点不到）
         this.bubbleStuck = true;

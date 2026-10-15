@@ -145,7 +145,7 @@ zhidaiqi/
 │   ├── test-naming.mjs            16 项命名引擎测试
 │   ├── test-unit.mjs              32 项纯逻辑单测
 │   ├── test-dom-smoke.mjs         26 项最小 DOM 真实链路烟测
-│   ├── test-app-wiring.mjs        17 项应用级接线测试（在 Node 里跑真正的 EditorApp）
+│   ├── test-app-wiring.mjs        18 项应用级接线测试（在 Node 里跑真正的 EditorApp）
 │   ├── test-bundle.mjs            12 项打包产物 + 接线契约校验
 │   ├── dom-shim.mjs               测试用的极小 DOM（含 iframe realm，不进产物）
 │   └── test-e2e.mjs               可选：真浏览器端到端（需要能起浏览器）
@@ -163,12 +163,12 @@ node tools/build.mjs --watch    # 改源码自动重新构建
 node tools/test-naming.mjs      # 16 项 命名引擎（人话名 / 图标 / 快捷词）
 node tools/test-unit.mjs        # 32 项纯逻辑
 node tools/test-dom-smoke.mjs   # 26 项真实 DOM 链路
-node tools/test-app-wiring.mjs  # 17 项应用级接线（真跑 EditorApp + iframe realm）
+node tools/test-app-wiring.mjs  # 18 项应用级接线（真跑 EditorApp + iframe realm）
 node tools/test-bundle.mjs      # 12 项打包产物 + 接线契约
 node tools/serve.mjs            # 开发服务（含真实模型代理）
 ```
 
-合计 **103 项**。页面内自检另有 **26 项**（顶栏「更多 ▾ → 🧪 页面内自检」）。
+合计 **104 项**。页面内自检另有 **26 项**（顶栏「更多 ▾ → 🧪 页面内自检」）。
 
 ## 快捷键
 

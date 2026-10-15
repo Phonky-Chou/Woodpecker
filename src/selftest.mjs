@@ -380,11 +380,14 @@ export async function runSelfTest(app, { log = () => {} } = {}) {
       }
     }),
 
-    want('按住时高亮由选择界面驱动，不跟随页面乱跳', async () => {
+    want('按住时滑到选项上就高亮（走真实浏览器路径）', async () => {
       const doc = t().doc;
       const win = t().win;
-      await t().selectCss(SELECTOR);
       const el = doc.querySelector(SELECTOR);
+      if (!el) {
+        check('按住时滑到选项上就高亮（走真实浏览器路径）', false, '找不到可测元素');
+        return;
+      }
       const r = el.getBoundingClientRect();
       const at = {
         bubbles: true,
@@ -394,38 +397,52 @@ export async function runSelfTest(app, { log = () => {} } = {}) {
         clientY: Math.round(r.y) + Math.max(2, Math.min(6, r.height / 4)),
       };
       doc.dispatchEvent(new win.PointerEvent('pointerdown', at));
-      await sleep(30);
-      if (!app.overlay.bubble) {
-        check('按住时高亮由选择界面驱动，不跟随页面乱跳', false, '候选界面没弹出来');
+      await sleep(40);
+      const bubble = app.overlay.bubble;
+      if (!bubble) {
+        check('按住时滑到选项上就高亮（走真实浏览器路径）', false, '候选界面没弹出来');
         return;
       }
-      const initial = app.overlay.currentIndex;
-      const initialLabel = app.overlay.hl.querySelector('.z-hl-tag')?.textContent ?? '';
-      // 指针在页面上移动（换个位置）
-      doc.dispatchEvent(new win.PointerEvent('pointermove', { ...at, clientX: 3, clientY: 3 }));
-      await sleep(40);
-      const afterMove = app.overlay.currentIndex;
-      // 滑到选择界面的第 2 项
-      const rows = app.overlay.bubble.querySelectorAll('[data-chain]');
-      let afterHover = -1;
-      let hoverHighlighted = false;
-      if (rows.length >= 2) {
-        rows[1].dispatchEvent(new win.MouseEvent('mouseover', { bubbles: true }));
-        await sleep(40);
-        afterHover = app.overlay.currentIndex;
-        hoverHighlighted = rows[1].classList.contains('on');
+      const rows = bubble.querySelectorAll('[data-chain]');
+      if (rows.length < 2) {
+        check('按住时滑到选项上就高亮（走真实浏览器路径）', false, '候选只有一个层级');
+        doc.dispatchEvent(new win.PointerEvent('pointerup', at));
+        return;
       }
-      const pageDidNotMove = afterMove === initial;
-      const bubbleDrives = rows.length < 2 || (afterHover === 1 && hoverHighlighted);
-      // 清理：结束这次按住，不留下工具条
+      const frameRect = app.frame.getBoundingClientRect();
+      const initial = app.overlay.currentIndex;
+      const results = [];
+      // 模拟"在 iframe 里按住后把指针移到选项上"：
+      // 浏览器此时可能把事件继续投递给 iframe（跨 frame 捕获），父窗口收不到自己的 hover，
+      // 所以这里**只派发 iframe 上的 pointermove** —— 走的正是坐标回传通道。
+      for (const i of [1, 0]) {
+        const rr = rows[i].getBoundingClientRect();
+        doc.dispatchEvent(
+          new win.PointerEvent('pointermove', {
+            bubbles: true,
+            cancelable: true,
+            button: 0,
+            clientX: Math.round(rr.left - frameRect.left + Math.min(12, rr.width / 3)),
+            clientY: Math.round(rr.top - frameRect.top + Math.min(8, rr.height / 2)),
+          }),
+        );
+        await sleep(60);
+        results.push({
+          i,
+          index: app.overlay.currentIndex,
+          on: rows[i].classList.contains('on'),
+        });
+      }
+      const ok = results.every((x) => x.index === x.i && x.on);
+      // 清理：结束这次按住
       doc.dispatchEvent(new win.PointerEvent('pointerup', at));
       await sleep(40);
       app.bubbleStuck = false;
       app.overlay.closeBubble();
       check(
-        '按住时高亮由选择界面驱动，不跟随页面乱跳',
-        pageDidNotMove && bubbleDrives,
-        `页面移动后层级不变=${pageDidNotMove}(${initial}→${afterMove}) 滑到第2项后=${afterHover} 该项高亮=${hoverHighlighted} 初始高亮=${initialLabel.slice(0, 12)}`,
+        '按住时滑到选项上就高亮（走真实浏览器路径）',
+        ok,
+        `初始层级=${initial}；滑到第1项→层级${results[0]?.index}(高亮=${results[0]?.on})、第0项→层级${results[1]?.index}(高亮=${results[1]?.on})`,
       );
     }),
 
