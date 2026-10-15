@@ -349,7 +349,7 @@ test('工具条状态下的 Esc 与"再按一次"都能收起它', async () => {
   assert.equal(app.root.querySelectorAll('.z-bubble').length, 1, '页面上同时只允许存在一个工具条');
 });
 
-test('按住时把指针移到选择界面上，弹层要"钉住"不乱动', async () => {
+test('按住时把指针移到选择界面上：弹层不位移，滑到哪一项就高亮哪一项', async () => {
   const app = await bootApp();
   const doc = app.frame.contentDocument;
   const h1 = doc.querySelector('h1');
@@ -357,26 +357,51 @@ test('按住时把指针移到选择界面上，弹层要"钉住"不乱动', asy
   const box = h1.getBoundingClientRect();
   const at = { clientX: Math.round(box.x) + 4, clientY: Math.round(box.y) + 4, button: 0 };
 
-  // 只按住，不松手
   doc.dispatchEvent({ type: 'pointerdown', ...at });
   await sleep(20);
-  assert.ok(app.overlay.bubble, '按住应弹出');
-  const before = app.overlay.bubble.querySelectorAll('[data-chain]').length;
+  const bubble = app.overlay.bubble;
+  assert.ok(bubble, '按住应弹出');
+  const posBefore = [bubble.style.getPropertyValue('left'), bubble.style.getPropertyValue('top')];
 
-  // 指针移到弹层上（浏览器里 iframe 此后收不到事件，弹层会收到 mouseenter）
-  app.overlay.bubble.dispatchEvent({ type: 'mouseenter' });
+  // 指针移到弹层上：弹层必须**待在原地**，否则用户刚碰到它就被弹走
+  bubble.dispatchEvent({ type: 'mouseenter' });
   await sleep(20);
-  assert.equal(app.overlay.bubble.classList.contains('stuck'), true, '移到弹层上应立即钉住');
-  assert.equal(app.bubbleStuck, true, '应用应记录"已钉住"状态');
-  assert.equal(app.overlay.bubble.querySelectorAll('[data-chain]').length, before, '钉住后候选项不应变化');
+  const posAfter = [bubble.style.getPropertyValue('left'), bubble.style.getPropertyValue('top')];
+  assert.deepEqual(posAfter, posBefore, '按住期间指针碰到弹层，弹层不允许位移');
+  assert.equal(bubble.classList.contains('stuck'), false, '还没松手，不该变成"已选中"工具条');
 
-  // 钉住后点某一层：应该切到那一层并保持工具条
-  const second = app.overlay.bubble.querySelectorAll('[data-chain]')[1];
-  if (second) {
-    second.click();
-    await sleep(60);
-    assert.ok(app.overlay.bubble, '点层级后工具条仍应在');
+  // 在选项上滑动：滑到哪一项，哪一项高亮，预览也跟着换
+  const rows = bubble.querySelectorAll('[data-chain]');
+  assert.ok(rows.length >= 3, `至少要有 3 层候选，实际 ${rows.length}`);
+  const labels = [];
+  for (const i of [1, 2, 1]) {
+    rows[i].dispatchEvent({ type: 'mouseover' });
+    await sleep(20);
+    assert.equal(app.overlay.currentIndex, i, `滑到第 ${i} 项应切到该层`);
+    assert.ok(rows[i].classList.contains('on'), `第 ${i} 项应高亮`);
+    labels.push(app.overlay.hl.querySelector('.z-hl-tag').textContent);
   }
+  assert.notEqual(labels[0], labels[1], '不同选项应给出不同的预览高亮');
+
+  // 指针离开 iframe（移向选择界面）时，不能重画"旧选中"把选项高亮盖掉
+  rows[1].dispatchEvent({ type: 'mouseover' });
+  await sleep(20);
+  const labelBeforeLeave = app.overlay.hl.querySelector('.z-hl-tag').textContent;
+  doc.dispatchEvent({ type: 'mouseleave' });
+  await sleep(30);
+  assert.equal(
+    app.overlay.hl.querySelector('.z-hl-tag').textContent,
+    labelBeforeLeave,
+    '鼠标离开预览区时，选项的高亮不许被"旧选中"覆盖',
+  );
+
+  // 在弹层上直接松手：应确认当前高亮的那一层，并变成常驻工具条
+  rows[2].dispatchEvent({ type: 'mouseover' });
+  await sleep(20);
+  bubble.dispatchEvent({ type: 'mouseup' });
+  await sleep(80);
+  assert.equal(app.selection?.name, app.overlay.chain[2].name, '在弹层上松手应确认高亮的那一层');
+  assert.equal(app.bubbleStuck, true, '松手后应变成常驻工具条');
 });
 
 test('越界自愈：把"可改 pid 白名单"回喂模型并自动重新生成', async () => {

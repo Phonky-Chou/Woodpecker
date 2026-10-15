@@ -137,7 +137,7 @@ export class Overlay {
       .join('');
     el.innerHTML =
       `<div class="z-bubble-chain z-scroll">${chainHtml}</div>` +
-      `<div class="z-bubble-hint">滑到某项即高亮<br>↑↓ 换层级<br>Esc 取消<br>双击可改名</div>` +
+      `<div class="z-bubble-hint">滑到某项即高亮<br>↑↓ 换层级<br>松开确定<br>双击可改名</div>` +
       `<div style="width:1px;height:52px;background:var(--z-border)"></div>` +
       `<div class="z-bubble-actions" style="display:flex;gap:4px;align-items:center">${actHtml}</div>`;
     this.container.appendChild(el);
@@ -157,14 +157,17 @@ export class Overlay {
       }
     });
 
-    // 按住时把指针移到弹层上：立刻"钉住"，
-    // 否则弹层会继续跟着指针换层级，用户根本没法稳定点到某一项或按钮。
+    // 按住期间把指针移到弹层上：**保持原位、什么都不做**。
+    // 之前这里会"钉住"并顺带把弹层挪到元素右下角 —— 结果用户刚碰到它就被弹走，
+    // 根本没法在选项上滑动。现在按住期间弹层不动，指针滑到哪一项就高亮哪一项。
     el.addEventListener('mouseenter', () => {
-      if (this.bubble?.classList.contains('stuck')) return;
-      this.onAction?.({ type: 'bubble-hover', chain: this.chain ?? chain, index: this.currentIndex ?? index });
+      this.hintState = this.hintState ?? 'holding';
     });
-    // 在弹层上松开鼠标：iframe 收不到这个事件，由父窗口自己把状态标成"已选中"
-    el.addEventListener('mouseup', () => this.markReleased());
+    // 在弹层上松开鼠标：iframe 收不到这个事件，由父窗口自己确认选中 + 变工具条
+    el.addEventListener('mouseup', () => {
+      this.markReleased();
+      this.onAction?.({ type: 'bubble-commit', chain: this.chain ?? chain, index: this.currentIndex ?? index });
+    });
 
     // R2.4：在弹层里 hover 某一项时，预览区实时高亮对应元素，
     // 并把 index 回传给 iframe 里的 picker（松手时由它执行选中）

@@ -735,6 +735,9 @@ export class EditorApp {
         break;
       case 'hover-end':
         this.overlay.hideTip();
+        // 候选界面开着（尤其按住时把指针移到了选择界面上）：
+        // 高亮由选项驱动，这里绝不能重画"旧选中"把选项高亮盖掉。
+        if (this.overlay.bubble) break;
         if (!this.selection) this.overlay.hideHighlight();
         else this.overlay.showHighlight(this.selection, { selected: true, label: `${this.selection.icon ?? ''} ${this.selection.name ?? ''} · 已选中` });
         break;
@@ -776,12 +779,18 @@ export class EditorApp {
       this.rpc('setBubbleIndex', { index: evt.index }).catch(() => {});
       return;
     }
-    // 按住时把指针移到弹层上 → 钉住（不再跟随指针换层级）；此时还没松手，提示保持"按住"状态
-    if (evt.type === 'bubble-hover') {
-      if (!this.bubbleStuck) {
-        this.bubbleStuck = true;
-        this.overlay.stickBubble({ chain: evt.chain, index: evt.index, released: false });
+    // 在弹层上直接松手（iframe 收不到这个事件）→ 在这里确认选中并变成工具条
+    if (evt.type === 'bubble-commit') {
+      const chosen = evt.chain?.[evt.index] ?? evt.chain?.[0];
+      this.bubbleStuck = true;
+      if (chosen?.pid) {
+        this.rpc('select', { pid: chosen.pid })
+          .then((fresh) => {
+            if (fresh) this.onSelect({ pid: chosen.pid, target: fresh });
+          })
+          .catch(() => {});
       }
+      this.overlay.stickBubble({ chain: evt.chain, index: evt.index, released: true });
       return;
     }
     const { action, chain, index } = evt;
