@@ -11,7 +11,9 @@
 
 一句话验收：**连续改三次，能逐级撤销回初始版本，再逐级重做回去。**
 
-> 界面语言优化（R1–R5）的实现与验收映射见 [docs/UI-OPTIMIZATION.md](docs/UI-OPTIMIZATION.md)。
+> ### 📖 第一次用请先看 → **[使用教程.md](使用教程.md)**
+> 面向使用者（含：怎么打开、怎么改一处、怎么贴图让 AI 判断位置、怎么改自己的网页、出问题怎么排查、**怎么反馈问题**）。
+> 本 README 偏工程实现；界面语言优化（R1–R7）的映射见 [docs/UI-OPTIMIZATION.md](docs/UI-OPTIMIZATION.md)。
 
 ---
 
