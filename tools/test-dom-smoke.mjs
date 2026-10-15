@@ -559,6 +559,21 @@ test('重试上下文会把"可改 pid 白名单 + 被拒原因"带上（自愈�
   assert.match(text, /改.*选中元素自身/s);
 });
 
+test('分词器：内联脚本里的 < 必须原样保留，不能当标签吃掉', () => {
+  // 真踩过：shim 的标签正则遇到 JS 里的 `index < 0` 时整条匹配失败，
+  // 于是那个 `<` 被静默丢弃 → 脚本变成 `if (index 0)` → SyntaxError → 页面监听全挂不上，
+  // 而测试还以为"通过了"（页面根本没交互）。用户真实的类 PPT 页面就是这么被抓出来的。
+  const src = '<html><body><script>if (a < b) { var s = "</div>"; }<\/script></body></html>';
+  const { document } = parseDocument(src);
+  const code = document.querySelector('script').textContent;
+  assert.ok(code.includes('a < b'), `JS 里的 "<" 被吃掉了：${JSON.stringify(code)}`);
+  assert.ok(code.includes('</div>'), '脚本里形如 </div> 的字符串也必须原样保留');
+  assert.ok(!code.includes('&lt;'), '不能把脚本内容做 HTML 转义');
+  // style/textarea 同理
+  const { document: d2 } = parseDocument('<html><head><style>.a > .b { color: red }</style></head><body></body></html>');
+  assert.ok(d2.querySelector('style').textContent.includes('.a > .b'), 'style 内容也要原样保留');
+});
+
 test('干净导出必须剥掉编辑器注入的 bootstrap 脚本', () => {
   // 模拟浏览器里的真实形态：文档末尾有 app 注入的 bootstrap <script data-z-inject>
   const withInject =

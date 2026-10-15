@@ -16,6 +16,23 @@ function isEditorNode(el) {
   return tag === 'SCRIPT' || tag === 'STYLE' || tag === 'TEMPLATE' || tag === 'NOSCRIPT';
 }
 
+/**
+ * 命中测试。
+ * 指代器开启时会铺一层全屏隔离层，`elementFromPoint` 会返回它 —— 那样就选不中任何东西了。
+ * 所以优先用 `elementsFromPoint` 拿到整条命中栈，跳过编辑器自己的节点（隔离层/注入的样式）。
+ */
+function hitAt(doc, x, y) {
+  if (typeof doc.elementsFromPoint === 'function') {
+    const stack = doc.elementsFromPoint(x, y) || [];
+    for (const el of stack) {
+      if (el && el.nodeType === 1 && !isEditorNode(el)) return el;
+    }
+    return null;
+  }
+  const single = doc.elementFromPoint(x, y);
+  return single && !isEditorNode(single) ? single : null;
+}
+
 export class Picker {
   /**
    * @param {object} deps
@@ -55,29 +72,33 @@ export class Picker {
   attach() {
     if (this.bound) return;
     this.bound = true;
-    const d = this.doc;
-    d.addEventListener('pointermove', this.onMove, true);
-    d.addEventListener('pointerdown', this.onDown, true);
-    d.addEventListener('pointerup', this.onUp, true);
-    d.addEventListener('keydown', this.onKey, true);
-    d.addEventListener('mouseleave', this.onLeave, true);
-    d.addEventListener('contextmenu', this.onContext, true);
-    this.win.addEventListener('scroll', this.onScroll, true);
-    this.win.addEventListener('resize', this.onScroll, true);
+    // 监听挂在 **window 的捕获阶段**，而不是 document：
+    // 拦截守卫也是在 window 捕获阶段（注册得更晚），事件路径 window → document → … → 目标，
+    // 这样指代器永远是第一个拿到事件的人，守卫再把事件掐断，
+    // 页面绑在元素/容器/document/window 上的监听就全都收不到（否则守卫会把指代器自己也冻住）。
+    const w = this.win;
+    w.addEventListener('pointermove', this.onMove, true);
+    w.addEventListener('pointerdown', this.onDown, true);
+    w.addEventListener('pointerup', this.onUp, true);
+    w.addEventListener('keydown', this.onKey, true);
+    w.addEventListener('mouseleave', this.onLeave, true);
+    w.addEventListener('contextmenu', this.onContext, true);
+    w.addEventListener('scroll', this.onScroll, true);
+    w.addEventListener('resize', this.onScroll, true);
   }
 
   detach() {
     if (!this.bound) return;
     this.bound = false;
-    const d = this.doc;
-    d.removeEventListener('pointermove', this.onMove, true);
-    d.removeEventListener('pointerdown', this.onDown, true);
-    d.removeEventListener('pointerup', this.onUp, true);
-    d.removeEventListener('keydown', this.onKey, true);
-    d.removeEventListener('mouseleave', this.onLeave, true);
-    d.removeEventListener('contextmenu', this.onContext, true);
-    this.win.removeEventListener('scroll', this.onScroll, true);
-    this.win.removeEventListener('resize', this.onScroll, true);
+    const w = this.win;
+    w.removeEventListener('pointermove', this.onMove);
+    w.removeEventListener('pointerdown', this.onDown);
+    w.removeEventListener('pointerup', this.onUp);
+    w.removeEventListener('keydown', this.onKey);
+    w.removeEventListener('mouseleave', this.onLeave);
+    w.removeEventListener('contextmenu', this.onContext);
+    w.removeEventListener('scroll', this.onScroll);
+    w.removeEventListener('resize', this.onScroll);
   }
 
   setMode(mode) {
@@ -108,7 +129,7 @@ export class Picker {
 
   /** 在某个坐标下，从最深层往外给出候选元素（用于"按住左键选层级"）。 */
   chainAt(x, y) {
-    const hit = this.doc.elementFromPoint(x, y);
+    const hit = hitAt(this.doc, x, y);
     if (!hit) return [];
     const chain = [];
     let cur = hit;
@@ -181,7 +202,7 @@ export class Picker {
     const now = e.timeStamp || Date.now();
     if (now - this.lastMoveTs < 16) return; // 约 60fps，别把 iframe 打满
     this.lastMoveTs = now;
-    const hit = this.doc.elementFromPoint(e.clientX, e.clientY);
+    const hit = hitAt(this.doc, e.clientX, e.clientY);
     if (!hit || isEditorNode(hit)) return;
     const pid = this.anchor.ensure(hit);
     this.hoverPid = pid;

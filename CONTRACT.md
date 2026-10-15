@@ -182,11 +182,33 @@
 
 ## 8. RPC 协议（bridge ↔ 父窗口）
 
-父→子：`hello/injectAnchors/setMode/getElementInfo/getChain/getContext/getNodeHtml/applyPatch/revertPatch/extractHtml/serializeClean/highlight/clearHighlight/select/scrollTo/setPreviewHighlight/evalInPage`
-子→父：`ready/pointermove/hover/select/cancel/pickError/response`
+父→子：`hello/injectAnchors/setMode/getElementInfo/getChain/getContext/getNodeHtml/applyPatch/revertPatch/extractHtml/serializeClean/highlight/clearHighlight/select/scrollTo/setPreviewHighlight/evalInPage/setBubbleIndex`
+子→父：`ready/mode/hover/hover-end/geometry/bubble-open/bubble-move/bubble-pointer/bubble-pick/bubble-close/select/deselect/selection-lost/escape/shortcut/pickError`
 
 - 全部消息带 `__z` 命名空间与 `id`；请求-响应用 `Map<id, {resolve,reject}>` 配对，10 s 超时。
 - 子窗口只上报**事实**（rect、pid、chain），所有 UI 决策与模型调用都在父窗口。
+
+### 8.1 交互隔离契约（指代器开关的语义）
+
+| 模式 | 页面自身能否收到输入 | 隔离层 | 说明 |
+| --- | --- | --- | --- |
+| `pick`（指代器开启） | **不能**。任何元素/容器/`document`/`window` 上的指针与键盘监听都收不到 | 有 `[data-z-shield]` | 事件先给指代器处理，再由守卫掐断 |
+| `browse`（指代器关闭） | **能**，完全正常 | 无 | 守卫与隔离层都不生效，一个事件都不拦 |
+
+实现约束（改动时务必遵守，否则会坏掉）：
+
+1. **指代器监听与拦截守卫必须挂在同一个对象、同一阶段**，且**指代器先注册**。
+   现在两者都在 `window` 的捕获阶段：事件路径 `window → document → … → 目标`，
+   同一节点同一阶段按注册顺序执行，于是顺序是「指代器处理 → 守卫掐断」。
+   若把守卫挂到 `document`、指代器留在 `window`（或反之），守卫会连指代器一起冻住。
+2. **隔离层**（`ensureShield` / `removeShield`）：`position:fixed; inset:0` 的透明元素，
+   带 `data-z-chrome="shield"`（因此导出时会被剥掉、`stats()` 也不计它）。
+   它负责让页面元素既收不到事件、也不进入 `:hover`；滚轮由它转发给页面，**开着指代器也能滚动**。
+3. **隔离层在场时命中测试必须用 `elementsFromPoint`** 并跳过 `data-z-chrome` 节点，
+   否则 `elementFromPoint` 只会返回隔离层，什么都选不中（`picker.mjs` 的 `hitAt()`）。
+4. **键盘被冻住，但应用快捷键要能用**：`Ctrl+Z` / `Ctrl+Shift+Z` / `Ctrl+S` / `Ctrl+Enter`
+   由守卫通过 `shortcut` 事件转发给父窗口执行。
+5. 页面自己的 `on*` 属性监听、行内事件同样被隔离层与守卫覆盖（不区分绑定方式）。
 
 ## 9. 四步交付与验收标准
 

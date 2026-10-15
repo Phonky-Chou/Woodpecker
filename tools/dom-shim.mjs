@@ -14,6 +14,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import vm from 'node:vm';
 import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
@@ -32,6 +33,20 @@ export function setScriptExecution(on) {
 
 export function loadDomShim() {
   if (cached) return cached;
+  // 防呆（真踩过两次）：
+  // ① SHIM_SOURCE 是用 String.raw 模板嵌进来的，正文里出现**反引号**或 ${ 会把模板提前截断，
+  //    生成出一份"语法错误、但外层模块不报错"的 .cjs（偶数个反引号时尤其阴险）；
+  // ② 直接对生成结果做一次语法校验，任何形式的改坏都当场暴露，而不是变成奇怪的运行时行为。
+  const TICK = String.fromCharCode(96);
+  const DOLLAR_BRACE = '$' + '{';
+  if (SHIM_SOURCE.includes(TICK) || SHIM_SOURCE.includes(DOLLAR_BRACE)) {
+    throw new Error('[shim] SHIM_SOURCE 正文里不允许出现反引号或 ${ —— 会把 String.raw 模板截断');
+  }
+  try {
+    new vm.Script(SHIM_SOURCE, { filename: 'dom-shim.generated.cjs' });
+  } catch (err) {
+    throw new Error('[shim] 生成的 shim 源码语法错误，请检查嵌入方式：' + err.message);
+  }
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'zhidaiqi-dom-'));
   const file = path.join(dir, 'dom-shim.cjs');
   fs.writeFileSync(file, SHIM_SOURCE, 'utf8');
@@ -73,7 +88,8 @@ function makeMemoryStorage() {
 }
 function deliverMessage(win, data) {
   if (!win) return;
-  const listeners = win._listeners?.get('message') ?? [];
+  // 监听条目形如 { fn, capture }（addEventListener 会记录阶段），这里取 fn
+  const listeners = (win._listeners?.get('message') ?? []).map((e) => (typeof e === 'function' ? e : e.fn));
   const list = [...listeners];
   if (!list.length) return;
   const evt = { data, origin: '*', source: null, type: 'message' };
@@ -89,6 +105,61 @@ function deliverMessage(win, data) {
   }
 }
 
+/**
+ * 事件派发（忠实度关键，别简化）：
+ *  ① 完整路径：元素 → … → document → window；
+ *  ② 区分**捕获阶段**（window → document → … → target）与**冒泡阶段**（target → … → window），
+ *     addEventListener 第三个参数会被真正尊重；
+ *  ③ 真正遵守 stopPropagation / stopImmediatePropagation / preventDefault。
+ * 这三点必须忠实：页面可能把监听绑在 document/window 上（reveal.js 风格演示页就是这样），
+ * 而"指代器开启时冻住页面交互"正是靠**捕获阶段** stopPropagation 实现的。
+ */
+function dispatchThrough(target, evt) {
+  const path = [];
+  let node = target;
+  let guard = 0;
+  while (node && guard++ < 64) {
+    path.push(node);
+    node = node.nodeType === 1 ? node.parentElement ?? null : null;
+  }
+  const doc = target.nodeType === 9 ? target : target.ownerDocument ?? null;
+  const win = doc?._win ?? null;
+  const full = []; // window → document → … → target
+  if (win) full.push(win);
+  if (doc && !full.includes(doc)) full.push(doc);
+  for (const el of [...path].reverse()) if (!full.includes(el)) full.push(el);
+
+  const base = { ...evt };
+  const state = { stopped: false, immediate: false };
+  const runNode = (t, wantCapture) => {
+    if (state.stopped) return;
+    const entries = t._listeners?.get(evt.type) ?? [];
+    state.immediate = false;
+    for (const entry of [...entries]) {
+      if (state.immediate || state.stopped) break;
+      if (!!entry.capture !== wantCapture) continue;
+      entry.fn.call(t, {
+        ...base,
+        target,
+        currentTarget: t,
+        preventDefault: () => {
+          base.defaultPrevented = true;
+        },
+        stopPropagation: () => {
+          state.stopped = true;
+        },
+        stopImmediatePropagation: () => {
+          state.stopped = true;
+          state.immediate = true;
+        },
+      });
+    }
+  };
+  for (const t of full) runNode(t, true); // 捕获：window → … → target
+  for (const t of [...full].reverse()) runNode(t, false); // 冒泡：target → … → window
+  return !base.defaultPrevented;
+}
+
 /** 在一个"独立 realm"里求值一段脚本：直接把 window 对象做成该 realm 的全局对象 */
 function runScriptInRealm(win, code) {
   if (!EXEC_SCRIPTS || !win || !code) return;
@@ -99,7 +170,12 @@ function runScriptInRealm(win, code) {
     const ctx = vm.createContext(win);
     vm.runInContext(code, ctx, { filename: 'iframe-script.js', timeout: 5000 });
   } catch (err) {
-    if (process.env.Z_SHIM_VERBOSE) console.error('[shim] 脚本执行失败：', err.message);
+    // 静默吞掉页面脚本的异常 = 虚假信心：页面监听根本没挂上，测试却"通过"了。
+    // 默认就出声（可用 Z_SHIM_QUIET=1 关掉）。
+    if (!process.env.Z_SHIM_QUIET) {
+      console.error('[shim] 页面内联脚本执行失败（该脚本的监听/初始化都没有生效）：' + err.message);
+      if (process.env.Z_SHIM_VERBOSE) console.error(err.stack);
+    }
   }
 }
 
@@ -426,33 +502,17 @@ class El {
     }
     return null;
   }
-  addEventListener(type, fn) {
+  addEventListener(type, fn, opts) {
+    const capture = typeof opts === 'boolean' ? opts : !!opts?.capture;
     if (!this._listeners.has(type)) this._listeners.set(type, []);
-    this._listeners.get(type).push(fn);
+    this._listeners.get(type).push({ fn, capture });
   }
   removeEventListener(type, fn) {
     const arr = this._listeners.get(type);
-    if (arr) this._listeners.set(type, arr.filter((f) => f !== fn));
+    if (arr) this._listeners.set(type, arr.filter((e) => e.fn !== fn));
   }
   dispatchEvent(evt) {
-    // 沿父链冒泡（浏览器语义）：target 始终是最初派发的元素，currentTarget 逐级上移。
-    // 没有冒泡就模拟不了"点击子按钮、由父容器的事件委托处理"这类真实交互。
-    let node = this;
-    let guard = 0;
-    while (node && guard++ < 64) {
-      const handlers = node._listeners?.get(evt.type) ?? [];
-      for (const fn of [...handlers]) {
-        fn.call(node, {
-          ...evt,
-          target: this,
-          currentTarget: node,
-          preventDefault: evt.preventDefault ?? (() => {}),
-          stopPropagation: evt.stopPropagation ?? (() => {}),
-        });
-      }
-      node = node.parentElement ?? null;
-    }
-    return true;
+    return dispatchThrough(this, evt);
   }
   getBoundingClientRect() {
     if (this._rectOverride) return this._rectOverride;
@@ -487,17 +547,30 @@ class Doc extends El {
   createTextNode(text) { const t = { nodeType: 3, textContent: String(text), parentElement: null, parentNode: null, outerHTML: '', remove() {} }; return t; }
   createDocumentFragment() { const f = new El('#fragment', this); f.nodeType = 11; return f; }
   elementFromPoint(x, y) { return this.elementFromPointResult ?? null; }
-  addEventListener(type, fn) {
+  /** 命中栈：浏览器里返回最上层到最下层；这里返回桩元素（有隔离层时上层是先放进去的节点） */
+  elementsFromPoint(x, y) {
+    const top = this.elementFromPointResult;
+    if (!top) return [];
+    const out = [];
+    let cur = top;
+    let guard = 0;
+    while (cur && guard++ < 32) {
+      out.push(cur);
+      cur = cur.parentElement ?? null;
+    }
+    return out;
+  }
+  addEventListener(type, fn, opts) {
+    const capture = typeof opts === 'boolean' ? opts : !!opts?.capture;
     if (!this._listeners.has(type)) this._listeners.set(type, []);
-    this._listeners.get(type).push(fn);
+    this._listeners.get(type).push({ fn, capture });
   }
   removeEventListener(type, fn) {
     const arr = this._listeners.get(type);
-    if (arr) this._listeners.set(type, arr.filter((f) => f !== fn));
+    if (arr) this._listeners.set(type, arr.filter((e) => e.fn !== fn));
   }
   dispatchEvent(evt) {
-    for (const fn of this._listeners.get(evt.type) ?? []) fn({ ...evt, target: evt.target ?? this, preventDefault() {}, stopPropagation() {} });
-    return true;
+    return dispatchThrough(this, evt);
   }
   get documentElement() { return this.children.find((c) => c.tagName === 'HTML') ?? null; }
   get head() { return this.querySelector('head'); }
@@ -529,13 +602,18 @@ class Win {
     this.localStorage = makeMemoryStorage();
     this.sessionStorage = makeMemoryStorage();
   }
-  addEventListener(type, fn) {
+  addEventListener(type, fn, opts) {
+    const capture = typeof opts === 'boolean' ? opts : !!opts?.capture;
     if (!this._listeners.has(type)) this._listeners.set(type, []);
-    this._listeners.get(type).push(fn);
+    this._listeners.get(type).push({ fn, capture });
   }
   removeEventListener(type, fn) {
     const arr = this._listeners.get(type);
-    if (arr) this._listeners.set(type, arr.filter((f) => f !== fn));
+    if (arr) this._listeners.set(type, arr.filter((e) => e.fn !== fn));
+  }
+  /** window 也要能被派发（页面常把监听绑在 window 上，例如方向键翻页） */
+  dispatchEvent(evt) {
+    return dispatchThrough(this, evt);
   }
   getComputedStyle(el) {
     const stub = {};
@@ -554,6 +632,9 @@ function escapeText(v) { return String(v).replace(/&/g, '&amp;').replace(/</g, '
 
 /* --------------------------- HTML 片段解析（够用即可） --------------------------- */
 
+/** 内容是"原始文本"的元素：内部允许出现 < （例如 JS 里的 index < 0），不能当标签解析 */
+const RAW_TEXT_TAGS = new Set(['script', 'style', 'textarea', 'title']);
+
 function parseHtmlFragment(html, doc) {
   const nodes = [];
   const stack = [];
@@ -567,6 +648,24 @@ function parseHtmlFragment(html, doc) {
       node.parentNode = null;
       nodes.push(node);
     }
+  };
+  /** 遇到 script/style 这类原始文本元素：把内容整段取出，绝不能逐字符过标签正则 */
+  const consumeRawText = (tag) => {
+    const close = new RegExp('</' + tag + '\\s*>', 'i');
+    const rest = html.slice(re.lastIndex);
+    const hit = rest.match(close);
+    if (!hit) {
+      push(makeTextNode(rest));
+      re.lastIndex = html.length;
+      stack.pop(); // 没找到闭合标签：这个元素到此为止
+      return;
+    }
+    const end = re.lastIndex + hit.index;
+    push(makeTextNode(html.slice(re.lastIndex, end)));
+    re.lastIndex = end + hit[0].length; // 连闭合标签一起跳过
+    // 闭合标签已经被我们吃掉了，这里必须自己把元素弹出栈 ——
+    // 否则后续兄弟元素会变成它的子节点（真踩过：脚本被 sanitize 删掉时，后面的内容跟着一起消失）。
+    stack.pop();
   };
   while ((m = re.exec(html))) {
     if (m[5] !== undefined) {
@@ -588,7 +687,12 @@ function parseHtmlFragment(html, doc) {
       const el = new El(tag, doc);
       parseAttrs(el, m[3] ?? '');
       push(el);
-      if (!m[4] && !VOID_TAGS.has(tag.toLowerCase())) stack.push(el);
+      const selfClosing = !!m[4] || VOID_TAGS.has(tag.toLowerCase());
+      if (!selfClosing) {
+        stack.push(el);
+        // 原始文本元素：立刻吃掉内容（否则 JS/CSS 里的 < 会被当成标签，把代码改坏）
+        if (RAW_TEXT_TAGS.has(tag.toLowerCase())) consumeRawText(tag.toLowerCase());
+      }
       continue;
     }
   }

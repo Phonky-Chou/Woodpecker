@@ -206,12 +206,12 @@ export class EditorApp {
     main.innerHTML =
       `<div class="z-stage" data-el="stage">` +
       `<div class="z-stage-bar">` +
-      `<label class="z-aim on" data-el="pick-pill" title="开关指代器（快捷键 P）">` +
+      `<label class="z-aim on" data-el="pick-pill" title="开关指代器（快捷键 P）。开启时页面暂时不可交互（不会误触发页面自己的点击/按键），只用于选取元素；关闭后页面功能照常。">` +
       `<span class="z-aim-dot"></span><input type="checkbox" checked data-el="pick-toggle" class="z-hidden">` +
       `<span data-el="aim-text">指代器已开启</span></label>` +
       `<span class="z-crumb" data-el="crumb"></span>` +
       `<span class="z-spacer" style="flex:1"></span>` +
-      `<span data-el="stage-hint">按住左键选一块</span>` +
+      `<span data-el="stage-hint">指代器中：页面暂时不可交互 · 按住左键选一块</span>` +
       `</div>` +
       `<div class="z-frame-wrap" data-el="frame-wrap">` +
       `<div class="z-frame-shell" data-el="frame-shell"><iframe data-el="frame" title="被编辑的页面"></iframe></div>` +
@@ -673,7 +673,7 @@ export class EditorApp {
         this.renderBreadcrumb(payload.chain);
         this.root.querySelector('[data-el="stage-hint"]').textContent = box
           ? `${box.w}×${box.h}px · 按住左键选这一块`
-          : '按住左键选一块';
+          : '指代器中：页面暂时不可交互 · 按住左键选一块';
         break;
       }
       case 'bubble-open':
@@ -715,6 +715,10 @@ export class EditorApp {
         break;
       case 'mode':
         this.setAiming(payload.mode === 'pick', { fromBridge: true });
+        break;
+      case 'shortcut':
+        // 指代器开着时页面被冻住，键盘到不了父窗口 → iframe 把应用快捷键转发上来
+        this.onShortcut(payload.action);
         break;
       case 'select':
         this.onSelect(payload);
@@ -1277,12 +1281,44 @@ export class EditorApp {
     window.addEventListener('keydown', async (e) => {
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
         e.preventDefault();
-        const clean = await this.rpc('extractCleanHtml');
-        this.store.push({ html: clean.html, label: '手动保存', source: 'manual-edit' });
-        this.toast(`已手动保存为 v${this.store.cursor}`, 'ok');
-        this.renderVersions();
+        await this.saveManualVersion();
       }
     });
+  }
+
+  /** 手动存一个版本（Ctrl+S，或指代器里转发过来的快捷键） */
+  async saveManualVersion() {
+    try {
+      const clean = await this.rpc('extractCleanHtml');
+      this.store.push({ html: clean.html, label: '手动保存', source: 'manual-edit' });
+      this.toast(`已手动保存为 v${this.store.cursor}`, 'ok');
+      this.renderVersions();
+    } catch (err) {
+      this.toast(`保存失败：${err.message}`, 'err');
+    }
+  }
+
+  /**
+   * 指代器开启时页面被"冻住"，键盘事件到不了父窗口，所以 iframe 会把
+   * 应用级快捷键转发上来（见 bridge 的 installInteractionGuard）。
+   */
+  onShortcut(action) {
+    switch (action) {
+      case 'undo':
+        this.undo();
+        break;
+      case 'redo':
+        this.redo();
+        break;
+      case 'save':
+        this.saveManualVersion();
+        break;
+      case 'accept':
+        if (this.preview) this.acceptPreview();
+        break;
+      default:
+        break;
+    }
   }
 
   /* ================================ 启动 ================================ */

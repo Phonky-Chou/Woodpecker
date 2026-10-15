@@ -17,6 +17,87 @@ import { ZError, truncateBytes } from './util.mjs';
 
 const NS = 'zhidaiqi';
 
+/* ======================================================================
+ * 指代器开启时"冻住"页面自身的交互
+ *
+ * 需求：导入的 HTML 在指代器**关闭**时功能完全正常；**开启**后鼠标只属于指代器，
+ * 页面自身收不到输入（例如按左键不该触发页面里"左键翻页"的逻辑）。
+ *
+ * 只靠一种手段挡不住全部情况，这里用两层：
+ *   ① 全屏透明隔离层：事件目标直接落在它身上，页面元素既收不到事件、也不会进入 :hover；
+ *   ② document/window 捕获阶段的守卫：掐断冒泡，页面绑在容器或 window 上的监听也拿不到。
+ * 两层都只在 picker.enabled 时才生效。
+ * ==================================================================== */
+
+const SHIELD_ATTR = 'data-z-shield';
+
+/** 铺一层透明隔离层（指代器开启时） */
+export function ensureShield(doc) {
+  if (doc.querySelector(`[${SHIELD_ATTR}]`)) return;
+  const shield = doc.createElement('div');
+  shield.setAttribute(SHIELD_ATTR, '');
+  shield.setAttribute('data-z-chrome', 'shield');
+  shield.style.cssText = ['position:fixed', 'inset:0', 'z-index:2147483646', 'background:transparent', 'cursor:crosshair'].join(';');
+  // 滚轮仍要能滚动页面，否则指代器一开就滚不动
+  shield.addEventListener(
+    'wheel',
+    (e) => {
+      e.preventDefault();
+      const root = doc.scrollingElement || doc.documentElement;
+      if (!root) return;
+      root.scrollTop += e.deltaY || 0;
+      root.scrollLeft += e.deltaX || 0;
+    },
+    { passive: false },
+  );
+  (doc.body || doc.documentElement)?.appendChild(shield);
+}
+
+export function removeShield(doc) {
+  doc.querySelectorAll(`[${SHIELD_ATTR}]`).forEach((el) => el.remove());
+}
+
+/** 指代器开启时要拦掉的事件类型 */
+const BLOCKED_EVENTS = [
+  'pointerdown', 'pointerup', 'pointermove', 'pointerover', 'pointerout', 'pointerenter', 'pointerleave',
+  'mousedown', 'mouseup', 'mousemove', 'mouseover', 'mouseout', 'mouseenter', 'mouseleave',
+  'click', 'dblclick', 'auxclick', 'contextmenu',
+  'keydown', 'keyup', 'keypress',
+  'touchstart', 'touchmove', 'touchend', 'touchcancel',
+  'dragstart', 'drag', 'dragend', 'drop', 'selectstart',
+];
+
+/** 应用级快捷键：键盘被冻住后这些仍要可用（转发给父窗口处理） */
+function shortcutOf(e) {
+  if (!(e.ctrlKey || e.metaKey)) return null;
+  const k = String(e.key || '').toLowerCase();
+  if (k === 'z') return e.shiftKey ? 'redo' : 'undo';
+  if (k === 's') return 'save';
+  if (k === 'enter') return 'accept';
+  return null;
+}
+
+/**
+ * 安装交互守卫。
+ *
+ * 必须在 picker.attach() **之后**调用，而且两者都要挂在同一个对象（window）的捕获阶段：
+ * 事件路径是 window → document → … → 目标，同节点同阶段按注册顺序执行，
+ * 于是顺序变成「指代器先处理 → 守卫再掐断」，页面（含绑在 document/window 上的监听）全都收不到。
+ *
+ * 注意别把守卫挂在 document 上而把指代器留在 document 上就以为没事：
+ * window 捕获比 document 捕获更早，守卫会把指代器自己一起冻住。
+ */
+export function installInteractionGuard({ win, picker, post }) {
+  const guard = (e) => {
+    if (!picker.enabled) return; // 指代器关闭 → 完全不拦，页面功能原样可用
+    const sc = shortcutOf(e);
+    if (sc) post('evt', { type: 'shortcut', action: sc }); // 应用快捷键转发给父窗口
+    e.preventDefault();
+    e.stopPropagation();
+  };
+  for (const type of BLOCKED_EVENTS) win.addEventListener(type, guard, { capture: true, passive: false });
+}
+
 /** 指代器激活时的光标反馈（R4.3）：注入到 iframe，但带 data-z-chrome，导出时会被剥掉 */
 const PICKER_STYLE_ID = 'data-z-picker-style';
 function ensurePickerStyle(doc) {
@@ -103,7 +184,11 @@ export function installBridge({ win, doc, token }) {
       return { ...res, pids: anchor.seen.size };
     },
 
-    setMode: ({ mode } = {}) => ({ mode: picker.setMode(mode) }),
+    setMode: ({ mode } = {}) => {
+      const m = picker.setMode(mode);
+      syncShield();
+      return { mode: m };
+    },
 
     /**
      * 同步"当前高亮的层级"。
@@ -293,9 +378,19 @@ export function installBridge({ win, doc, token }) {
     anchor.injectAll();
     ensurePickerStyle(doc); // R4.3：指代器激活时的瞄准光标/选中描边
     picker.attach();
+    // 守卫必须在 picker.attach() 之后注册：同节点同阶段按注册顺序执行，
+    // 先让指代器处理事件，再把事件掐断，页面自身才拿不到输入。
+    installInteractionGuard({ win, picker, post });
     picker.setMode(MODES.PICK);
+    syncShield();
     ready = true;
     post('ready', { pids: anchor.seen.size, elements: doc.querySelectorAll('*').length });
+  }
+
+  /** 隔离层跟随"指代器开关"：开着才铺，关掉必须撤掉，页面才能正常交互 */
+  function syncShield() {
+    if (picker.enabled) ensureShield(doc);
+    else removeShield(doc);
   }
 
   if (doc.readyState === 'loading') doc.addEventListener('DOMContentLoaded', boot, { once: true });

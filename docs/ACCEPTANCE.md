@@ -16,13 +16,13 @@ cd C:\Users\Windows\Documents\deepseek-harness\default-workspace\zhidaiqi
 node tools/build.mjs
 node tools/test-naming.mjs        # 16 项 命名引擎（界面"说人话"）
 node tools/test-unit.mjs         # 32 项
-node tools/test-dom-smoke.mjs    # 26 项
-node tools/test-app-wiring.mjs   # 18 项（应用级接线 + 工具条行为，最关键）
+node tools/test-dom-smoke.mjs    # 27 项
+node tools/test-app-wiring.mjs   # 21 项（应用级接线 + 工具条行为，最关键）
 node tools/test-bundle.mjs       # 12 项
 ```
 
-合计 **104 项，0 失败**。改了 `src/` 必须重新构建，否则 `test-bundle` 会直接报"产物过期"。
-另有页面内自检 **26 项**（浏览器里点「更多 ▾ → 🧪 页面内自检」）。
+合计 **108 项，0 失败**。改了 `src/` 必须重新构建，否则 `test-bundle` 会直接报"产物过期"。
+另有页面内自检 **27 项**（浏览器里点「更多 ▾ → 🧪 页面内自检」）。
 
 ### A-1. 界面语言优化（`test-naming.mjs` 16 项 + `test-app-wiring.mjs` 5 项）
 
@@ -41,6 +41,20 @@ node tools/test-bundle.mjs       # 12 项
 | R5 | 自定义命名生效到弹层/面板/**AI 上下文**，并持久化到本地存储 |
 | 布局 | 应用根容器撑满视口（`.z-app` = 100dvh 栅格），**底部不留白边** |
 | 交互 | **松手后选择界面必须留在页面上**（"已选中工具条"），`让 AI 改这块 / 改名 / 复制 / ✕` 都能点到；按住时移到弹层上会"钉住" |
+| R6 | **交互隔离**：指代器开启时页面收不到任何输入（改到容器/`document`/`window` 上的点击与按键一律不触发），关闭后页面功能完全恢复；开启时仍能滚动、应用快捷键仍可用 |
+
+### A-2. 交互隔离（`test-app-wiring.mjs` 3 项 + 页面内自检 1 项）
+
+用一份"类 PPT"夹具复刻真实场景：页面把**左键翻页绑在容器**上（冒泡）、把**方向键翻页绑在 `window`** 上（冒泡），
+还额外绑了一个 `document` 级监听（最难挡的一种）。
+
+| 验的是什么 | 断言 |
+| --- | --- |
+| 指代器开启 → 页面被冻住 | 夹具的三个监听（容器 / `document` / `window`）**全部不触发**，页面状态不被改动 |
+| 指代器开启 → 指代器自己照常工作 | 隔离层在场时悬停仍能命中页面元素（走 `elementsFromPoint` 跳过隔离层），高亮有名字 |
+| 指代器关闭 → 页面完全恢复 | 三个监听**全部正常触发**、页面状态真的改变；隔离层被撤掉；桥切到 `browse` |
+| 再开回来 | 隔离层重新铺上，页面立刻又收不到输入 |
+| 键盘被冻住但快捷键可用 | `Ctrl+Z` / `Ctrl+Shift+Z` / `Ctrl+S` 被转发成 `undo` / `redo` / `save`；页面仍然收不到方向键 |
 
 ### A0. 应用级接线（`test-app-wiring.mjs`，11 项）—— 补上最大的测试盲区
 

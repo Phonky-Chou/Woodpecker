@@ -45,7 +45,7 @@ async function waitFor(fn, { timeout = 5000, interval = 10, label = '条件' } =
 }
 
 /** 在一个 shim window 里加载打包好的 app bundle，并构造 EditorApp */
-async function bootApp({ win: reuseWin } = {}) {
+async function bootApp({ win: reuseWin, demoHtml = SAMPLE } = {}) {
   const { window: win, document: doc } = reuseWin
     ? { window: reuseWin, document: reuseWin.document }
     : parseDocument('<!DOCTYPE html><html><body><div id="app"></div></body></html>');
@@ -63,7 +63,7 @@ async function bootApp({ win: reuseWin } = {}) {
   doc.body.appendChild(host);
   const app = new EditorApp(host, {
     bridgeSource: Z.bridgeSource,
-    demoHtml: SAMPLE,
+    demoHtml,
   });
   app.__win = win;
   app.__doc = doc;
@@ -71,6 +71,29 @@ async function bootApp({ win: reuseWin } = {}) {
   await app.bootPromise; // 等初始化完成，避免和启动过程抢时序
   return app;
 }
+
+/**
+ * 夹具：一个"类 PPT"页面，交互形态照搬用户的 reveal.js 风格演示页 ——
+ * 页面把"左键下一页"绑在**容器**上（冒泡），把"方向键翻页"绑在 **window** 上（冒泡），
+ * 另外还绑了一个 document 级监听（最难挡的一种）。
+ */
+const PPT_LIKE = `<!DOCTYPE html><html><head><title>演示</title></head><body>
+<div id="deck">
+  <section class="slide active" id="s1"><h1>第一页</h1><p>按左键或方向键翻页</p></section>
+  <section class="slide" id="s2"><h1>第二页</h1></section>
+</div>
+<script>
+  window.__pageClicks = 0;
+  window.__pageKeys = 0;
+  window.__docClicks = 0;
+  var deck = document.getElementById('deck');
+  deck.addEventListener('click', function () { window.__pageClicks++; deck.setAttribute('data-page', String(window.__pageClicks)); });
+  // 这里故意写一个 "<" 比较：shim 的分词器若把 JS 里的 "<" 当标签解析，脚本会解析失败、
+  // 监听全部挂不上（真实用户页面就是这样被发现的），这条断言就是那个回归。
+  window.addEventListener('keydown', function (e) { if (window.__pageKeys < 999 && (e.key === 'ArrowRight' || e.key === ' ')) window.__pageKeys++; });
+  document.addEventListener('click', function () { window.__docClicks++; });
+<\/script>
+</body></html>`;
 
 test('S1 回归：父窗口必须自己注册 message 监听（否则 ready 永远收不到）', async () => {
   const app = await bootApp();
@@ -516,15 +539,26 @@ test('按住时层级由选择界面驱动，不跟随页面元素乱跳', async
   assert.equal(app.overlay.currentIndex, 0, '初始应是最内层（鼠标按下的那一层）');
   const firstLabel = app.overlay.hl.querySelector('.z-hl-tag').textContent;
 
-  // 指针在**页面上**移动到别的元素（这里是 body）→ 层级不许变
+  // 造一个确定性布局：候选行都放在 (400,300) 一带。
+  // 为什么必须显式给矩形：按住期间走"iframe 坐标回传"通道做命中测试，
+  // 而 shim 没有排版引擎（默认矩形是按 uid 造的假值），不钉住布局这条断言就会随机失败。
+  // 注意：指针**真的落在某一行上**时切换层级是预期行为，所以这里要把行放得足够远。
+  app.frameWrap._rectOverride = { left: 0, top: 0, width: 800, height: 600, x: 0, y: 0, right: 800, bottom: 600 };
+  app.frame._rectOverride = { left: 0, top: 0, width: 800, height: 600, x: 0, y: 0, right: 800, bottom: 600 };
+  const rowEls = app.overlay.bubble.querySelectorAll('[data-chain]');
+  rowEls.forEach((row, i) => {
+    row._rectOverride = { left: 400, top: 300 + i * 30, width: 220, height: 28, x: 400, y: 300 + i * 30, right: 620, bottom: 328 + i * 30 };
+  });
+
+  // 指针在**页面上**移动（远离弹层）→ 层级不许变
   doc.elementFromPointResult = doc.body;
   doc.dispatchEvent({ type: 'pointermove', clientX: 6, clientY: 6, button: 0 });
   await sleep(30);
-  assert.equal(app.overlay.currentIndex, 0, '按住期间指针在页面上移动，不应改变层级');
+  assert.equal(app.overlay.currentIndex, 0, '按住期间指针在页面上（弹层之外）移动，不应改变层级');
   assert.equal(app.overlay.hl.querySelector('.z-hl-tag').textContent, firstLabel, '预览高亮不应跟着页面跳');
 
   // 滑到选择界面的第 2 项 → 这一项要高亮，预览也跟着换
-  const rows = app.overlay.bubble.querySelectorAll('[data-chain]');
+  const rows = rowEls;
   assert.ok(rows.length >= 2, '至少要有两层候选');
   rows[1].dispatchEvent({ type: 'mouseover' });
   await sleep(30);
@@ -576,6 +610,106 @@ test('按住时即使 iframe 捕获了指针事件，滑到选项上也要高亮
   assert.ok(rows[targetRow].classList.contains('on'), '第 2 项要高亮');
   const bridge = app.frame.contentWindow.__zBridge;
   assert.equal(bridge.picker.bubble?.index, targetRow, 'iframe 里的 picker 也要同步到这一层（松手才选得对）');
+});
+
+test('指代器开启时页面被冻住：左键点击/方向键都到不了页面（类 PPT 场景）', async () => {
+  const app = await bootApp({ demoHtml: PPT_LIKE });
+  const doc = app.frame.contentDocument;
+  const win = app.frame.contentWindow;
+  const h1 = doc.querySelector('h1');
+  // 夹具脚本应已执行（确认测试前提成立）
+  assert.equal(win.__pageClicks, 0, '夹具脚本应已执行（页面自身监听已绑定）');
+  assert.ok(
+    (doc.getElementById('deck')._listeners?.get('click') ?? []).length > 0,
+    '页面脚本必须真的跑起来了：容器上的 click 监听要挂上（脚本解析失败会静默变成"没有监听"）',
+  );
+
+  // ① 指代器默认就是开启的：隔离层必须在
+  assert.ok(doc.querySelector('[data-z-shield]'), '指代器开启时应铺隔离层');
+  assert.equal(await app.rpc('stats').then((s) => s.mode), 'pick');
+
+  // ② 模拟"按左键"：指针按下 + 抬起 + click
+  doc.elementFromPointResult = h1;
+  const box = h1.getBoundingClientRect();
+  const at = { clientX: Math.round(box.x) + 4, clientY: Math.round(box.y) + 4, button: 0 };
+  for (const type of ['pointerdown', 'pointerup']) doc.dispatchEvent({ type, ...at });
+  h1.dispatchEvent({ type: 'click', ...at });
+  await sleep(40);
+  assert.equal(win.__pageClicks, 0, '指代器开启时，页面绑在容器上的 click 绝不能触发（不能翻页）');
+  assert.equal(win.__docClicks, 0, '指代器开启时，document 级 click 监听也不能触发');
+  assert.equal(doc.getElementById('deck').getAttribute('data-page'), null, '页面状态不应被改动');
+
+  // ③ 模拟"按方向键"：页面绑在 window 上的 keydown 也不能触发
+  doc.dispatchEvent({ type: 'keydown', key: 'ArrowRight' });
+  await sleep(20);
+  assert.equal(win.__pageKeys, 0, '指代器开启时，页面绑在 window 上的 keydown 绝不能触发');
+
+  // ④ 但指代器自己必须还能用：悬停要能识别到页面元素（隔离层不能被当成目标）
+  doc.dispatchEvent({ type: 'pointermove', ...at });
+  await sleep(40);
+  const label = app.overlay.hl?.querySelector('.z-hl-tag')?.textContent ?? '';
+  assert.ok(label.includes('标题'), `悬停仍要命中页面元素（隔离层要能被跳过），实际高亮=${label}`);
+});
+
+test('指代器关闭后页面功能完全恢复：左键/方向键都能用', async () => {
+  const app = await bootApp({ demoHtml: PPT_LIKE });
+  const doc = app.frame.contentDocument;
+  const win = app.frame.contentWindow;
+  const h1 = doc.querySelector('h1');
+  doc.elementFromPointResult = h1;
+  const box = h1.getBoundingClientRect();
+  const at = { clientX: Math.round(box.x) + 4, clientY: Math.round(box.y) + 4, button: 0 };
+
+  // 关掉指代器（等同于点顶栏的"指代器"开关）
+  await app.setAiming(false);
+  await sleep(60);
+  assert.equal(doc.querySelector('[data-z-shield]'), null, '指代器关闭后必须撤掉隔离层');
+  assert.equal((await app.rpc('stats')).mode, 'browse', '桥应切到 browse 模式');
+
+  // ① 左键点击 → 页面自己的"翻页"逻辑正常触发
+  for (const type of ['pointerdown', 'pointerup']) doc.dispatchEvent({ type, ...at });
+  h1.dispatchEvent({ type: 'click', ...at });
+  await sleep(40);
+  assert.equal(win.__pageClicks, 1, '指代器关闭后，页面绑在容器上的 click 必须正常触发');
+  assert.equal(win.__docClicks, 1, '指代器关闭后，document 级监听也必须正常触发');
+  assert.equal(doc.getElementById('deck').getAttribute('data-page'), '1', '页面状态应真的被改动');
+
+  // ② 方向键 → 页面绑在 window 上的 keydown 正常触发
+  doc.dispatchEvent({ type: 'keydown', key: 'ArrowRight' });
+  await sleep(20);
+  assert.equal(win.__pageKeys, 1, '指代器关闭后，页面绑在 window 上的 keydown 必须正常触发');
+
+  // ③ 再开回来 → 立刻重新冻住
+  await app.setAiming(true);
+  await sleep(60);
+  assert.ok(doc.querySelector('[data-z-shield]'), '重新开启后隔离层要回来');
+  h1.dispatchEvent({ type: 'click', ...at });
+  await sleep(30);
+  assert.equal(win.__pageClicks, 1, '重新开启后点击又不该触发页面逻辑');
+});
+
+test('指代器开启时，应用自己的快捷键仍可用（Ctrl+Z / Ctrl+S 由 iframe 转发）', async () => {
+  const app = await bootApp({ demoHtml: PPT_LIKE });
+  const doc = app.frame.contentDocument;
+  let sawShortcut = null;
+  const origHandler = app.onBridgeEvent.bind(app);
+  app.onBridgeEvent = (evt) => {
+    if (evt.type === 'shortcut') sawShortcut = evt.action;
+    return origHandler(evt);
+  };
+  doc.dispatchEvent({ type: 'keydown', key: 'z', ctrlKey: true });
+  await sleep(40);
+  assert.equal(sawShortcut, 'undo', '指代器开启时 Ctrl+Z 应被转发成 undo');
+  doc.dispatchEvent({ type: 'keydown', key: 'z', ctrlKey: true, shiftKey: true });
+  await sleep(40);
+  assert.equal(sawShortcut, 'redo', 'Ctrl+Shift+Z 应被转发成 redo');
+  doc.dispatchEvent({ type: 'keydown', key: 's', ctrlKey: true });
+  await sleep(40);
+  assert.equal(sawShortcut, 'save', 'Ctrl+S 应被转发成 save');
+  // 页面自己仍然收不到方向键（冻住不变）
+  doc.dispatchEvent({ type: 'keydown', key: 'ArrowRight' });
+  await sleep(20);
+  assert.equal(app.frame.contentWindow.__pageKeys, 0, '页面依然收不到按键');
 });
 
 test.after?.(() => {});

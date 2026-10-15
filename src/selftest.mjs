@@ -446,6 +446,45 @@ export async function runSelfTest(app, { log = () => {} } = {}) {
       );
     }),
 
+    want('指代器开启时页面被冻住，关闭后页面功能恢复', async () => {
+      const doc = t().doc;
+      const win = t().win;
+      const el = doc.querySelector(SELECTOR) ?? doc.body;
+      // 现场给页面挂一个"自己的交互"，模拟导入的 HTML 自带的点击逻辑
+      let pageHits = 0;
+      const pageHandler = () => {
+        pageHits++;
+      };
+      doc.body.addEventListener('click', pageHandler);
+      const r = el.getBoundingClientRect();
+      const at = { bubbles: true, cancelable: true, button: 0, clientX: Math.round(r.x) + 4, clientY: Math.round(r.y) + 4 };
+
+      // ① 指代器开启（默认）：隔离层在，页面的点击逻辑收不到
+      const shieldOn = !!doc.querySelector('[data-z-shield]');
+      doc.dispatchEvent(new win.MouseEvent('click', at));
+      await sleep(30);
+      const blocked = pageHits === 0;
+
+      // ② 关掉指代器：隔离层撤掉，页面逻辑恢复正常
+      await app.setAiming(false);
+      await sleep(60);
+      const shieldOff = !doc.querySelector('[data-z-shield]');
+      doc.dispatchEvent(new win.MouseEvent('click', at));
+      await sleep(30);
+      const restored = pageHits > 0;
+
+      // ③ 收尾：开回指代器并摘掉临时监听
+      await app.setAiming(true);
+      await sleep(40);
+      const shieldBack = !!doc.querySelector('[data-z-shield]');
+      doc.body.removeEventListener('click', pageHandler);
+      check(
+        '指代器开启时页面被冻住，关闭后页面功能恢复',
+        shieldOn && blocked && shieldOff && restored && shieldBack,
+        `开启时有隔离层=${shieldOn} 页面点击被挡=${blocked} 关闭后隔离层撤掉=${shieldOff} 页面点击恢复=${restored} 再开启隔离层回来=${shieldBack}`,
+      );
+    }),
+
     want('版本历史与预览卡渲染正常', async () => {
       app.switchTab('versions');
       const rows = document.querySelectorAll('.z-ver').length;
