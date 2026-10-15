@@ -1,0 +1,21 @@
+{
+  "name": "zhidaiqi",
+  "version": "1.0.0",
+  "private": true,
+  "description": "指代器 AI HTML 编辑器：指着元素说人话，AI 只改这一块，可预览可回滚可回看",
+  "type": "module",
+  "scripts": {
+    "build": "node tools/build.mjs",
+    "test": "node tools/build.mjs && node tools/test-unit.mjs && node tools/test-dom-smoke.mjs && node tools/test-app-wiring.mjs && node tools/test-bundle.mjs",
+    "test:unit": "node tools/test-unit.mjs",
+    "test:dom": "node tools/test-dom-smoke.mjs",
+    "test:wiring": "node tools/test-app-wiring.mjs",
+    "test:bundle": "node tools/test-bundle.mjs",
+    "test:e2e": "node tools/test-e2e.mjs",
+    "serve": "node tools/serve.mjs",
+    "dev": "node tools/build.mjs --watch"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

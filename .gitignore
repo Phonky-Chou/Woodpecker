@@ -1,0 +1,10 @@
+# 依赖（本项目零依赖，仅防御性忽略）
+node_modules/
+
+# 编辑器/系统杂物
+.DS_Store
+Thumbs.db
+*.log
+
+# 临时探针脚本（开发时用于定位问题的 throwaway，不应入库）
+tools/_*.mjs

@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>星野咖啡 · 品牌页（指代器示例）</title>
+<style>
+  :root {
+    --brand: #b45309;
+    --brand-soft: #fef3c7;
+    --ink: #1f2937;
+    --dim: #6b7280;
+    --line: #e5e7eb;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+    color: var(--ink);
+    background: #fffdf8;
+    line-height: 1.7;
+  }
+  header.site {
+    display: flex; align-items: center; gap: 22px;
+    padding: 16px 32px; border-bottom: 1px solid var(--line);
+    background: rgba(255, 253, 248, .92); position: sticky; top: 0;
+  }
+  .logo { font-weight: 800; letter-spacing: .5px; font-size: 19px; color: var(--brand); }
+  nav.site-nav { display: flex; gap: 16px; font-size: 14px; color: var(--dim); }
+  nav.site-nav a { color: inherit; text-decoration: none; }
+  nav.site-nav a:hover { color: var(--brand); }
+  .site-cta {
+    margin-left: auto; background: var(--brand); color: #fff; border: 0;
+    padding: 8px 16px; border-radius: 999px; font-size: 14px; cursor: pointer;
+  }
+
+  main { max-width: 960px; margin: 0 auto; padding: 40px 28px 64px; }
+
+  .hero { padding: 22px 0 34px; border-bottom: 1px dashed var(--line); }
+  .hero .eyebrow {
+    display: inline-block; font-size: 12px; letter-spacing: 2px; color: var(--brand);
+    background: var(--brand-soft); padding: 3px 10px; border-radius: 999px; margin-bottom: 14px;
+  }
+  .hero h1 { font-size: 34px; line-height: 1.3; margin: 0 0 12px; }
+  .hero p.lede { font-size: 16px; color: var(--dim); margin: 0 0 20px; max-width: 620px; }
+  .hero-actions { display: flex; gap: 12px; align-items: center; }
+  .btn-primary { background: var(--brand); color: #fff; border: 0; padding: 10px 20px; border-radius: 10px; font-size: 15px; cursor: pointer; }
+  .btn-ghost { background: transparent; color: var(--brand); border: 1px solid var(--brand); padding: 10px 18px; border-radius: 10px; font-size: 15px; cursor: pointer; }
+  .price-tag { font-size: 15px; color: var(--dim); }
+  .price-tag b { color: var(--ink); font-size: 22px; }
+
+  section.block { padding: 34px 0; border-bottom: 1px solid var(--line); }
+  section.block h2 { font-size: 22px; margin: 0 0 6px; }
+  section.block > p { color: var(--dim); margin: 0 0 22px; }
+
+  .cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+  .card {
+    border: 1px solid var(--line); border-radius: 14px; padding: 18px; background: #fff;
+    box-shadow: 0 1px 2px rgba(15, 23, 42, .04);
+  }
+  .card h3 { font-size: 16px; margin: 0 0 6px; }
+  .card p { font-size: 13.5px; color: var(--dim); margin: 0 0 12px; }
+  .card .badge { font-size: 11px; background: var(--brand-soft); color: var(--brand); padding: 2px 8px; border-radius: 999px; }
+  .card .num { font-size: 26px; font-weight: 700; color: var(--brand); }
+
+  ul.plain { padding-left: 20px; color: var(--ink); }
+  ul.plain li { margin-bottom: 6px; }
+
+  table.plan { width: 100%; border-collapse: collapse; font-size: 14px; }
+  table.plan th, table.plan td { border-bottom: 1px solid var(--line); padding: 10px 8px; text-align: left; }
+  table.plan th { color: var(--dim); font-weight: 600; }
+
+  footer.site {
+    padding: 22px 32px; color: var(--dim); font-size: 13px;
+    border-top: 1px solid var(--line); display: flex; gap: 14px; align-items: center;
+  }
+</style>
+</head>
+<body>
+<header class="site">
+  <div class="logo">星野咖啡</div>
+  <nav class="site-nav">
+    <a href="#menu">菜单</a>
+    <a href="#story">故事</a>
+    <a href="#plan">订阅</a>
+  </nav>
+  <button class="site-cta" type="button">预约到店</button>
+</header>
+
+<main>
+  <section class="hero">
+    <span class="eyebrow">手冲 · 单一产地</span>
+    <h1>一杯喝得出经纬度的咖啡</h1>
+    <p class="lede">每周从 3 个产区空运到店，烘焙后 7 天内出杯。你可以指着这句标题，说「再大一点，换成深蓝」试试。</p>
+    <div class="hero-actions">
+      <button class="btn-primary" type="button">查看本周豆单</button>
+      <button class="btn-ghost" type="button">了解冲煮方式</button>
+      <span class="price-tag">单杯 <b>¥28</b> 起</span>
+    </div>
+  </section>
+
+  <section class="block" id="menu">
+    <h2>本周三支豆子</h2>
+    <p>选中任意一张卡片，让它圆角大一点、加个阴影，或者把标签文字换掉。</p>
+    <div class="cards">
+      <article class="card">
+        <span class="badge">埃塞俄比亚</span>
+        <h3>耶加雪菲 沃卡</h3>
+        <p>柑橘、白花、红茶尾韵。水洗处理，中浅烘。</p>
+        <div class="num">¥32</div>
+      </article>
+      <article class="card">
+        <span class="badge">哥伦比亚</span>
+        <h3>慧兰 河谷</h3>
+        <p>焦糖、坚果、柔和的苹果酸。适合奶咖。</p>
+        <div class="num">¥28</div>
+      </article>
+      <article class="card">
+        <span class="badge">云南</span>
+        <h3>保山 小粒</h3>
+        <p>红糖、烤红薯、可可。支持国产豆，稳定好喝。</p>
+        <div class="num">¥26</div>
+      </article>
+    </div>
+  </section>
+
+  <section class="block" id="story">
+    <h2>我们怎么烘豆</h2>
+    <p>选中下面任意一条，试试「加粗」「行高一点」「换成棕色」。</p>
+    <ul class="plain">
+      <li>每周二、周五两次烘焙，小批量 6 公斤一锅。</li>
+      <li>烘焙曲线记在墙上，客人可以翻看每一锅的数据。</li>
+      <li>出杯前 48 小时的豆子不上架，养豆期不糊弄。</li>
+    </ul>
+  </section>
+
+  <section class="block" id="plan">
+    <h2>订阅方案</h2>
+    <p>表格里的表头也可以选中——比如把「每月豆量」改成「每月到手」。</p>
+    <table class="plan">
+      <thead>
+        <tr><th>方案</th><th>每月豆量</th><th>价格</th><th>配送</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>轻享</td><td>200g</td><td>¥98</td><td>每月 1 次</td></tr>
+        <tr><td>常饮</td><td>500g</td><td>¥196</td><td>每月 2 次</td></tr>
+        <tr><td>重度</td><td>1kg</td><td>¥328</td><td>每周 1 次</td></tr>
+      </tbody>
+    </table>
+  </section>
+</main>
+
+<footer class="site">
+  <span>© 2024 星野咖啡</span>
+  <span>· 上海市静安区某某路 1 号</span>
+  <span>· 每日 8:00–20:00</span>
+</footer>
+</body>
+</html>
