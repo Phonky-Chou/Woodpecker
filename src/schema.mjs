@@ -11,7 +11,7 @@ export const PATCH_VERSION = 1;
 export const MAX_CHANGES = 50;
 export const MAX_HTML_BYTES = 60 * 1024;
 
-export const OPS = ['setStyle', 'setText', 'setAttr', 'setHtml', 'insertHtml', 'removeNode'];
+export const OPS = ['setStyle', 'setText', 'setAttr', 'setHtml', 'insertHtml', 'insertImage', 'removeNode'];
 export const INSERT_POSITIONS = ['before', 'after', 'append', 'prepend'];
 
 /** can-edit 的 CSS 属性白名单：覆盖布局/排版/颜色/装饰/变换，杜绝 position:fixed 之类的越界破坏 */
@@ -177,6 +177,27 @@ export function validatePatchShape(raw) {
         out.html = change.html;
         break;
       }
+      case 'insertImage': {
+        // 用户从对话框带进来的图片：模型只需要给出"放哪"和"用哪张"，
+        // 资源本体（data URL）由父窗口在应用时补上，绝不让模型碰 base64。
+        const asset = String(change.asset ?? change.assetId ?? change.image ?? '').trim();
+        if (!asset) fail(`${at}.asset 必填（用 context.assets[].id 指定要插入的图片）`, 'E_PATCH_SHAPE');
+        out.asset = asset;
+        // 图片默认落在选中元素**内部末尾**（不写位置时不要插到选区外面去）
+        const pos = String(change.position ?? change.pos ?? 'append').toLowerCase();
+        if (!INSERT_POSITIONS.includes(pos)) fail(`${at}.position 只能是 ${INSERT_POSITIONS.join(' / ')}`, 'E_PATCH_SHAPE');
+        out.position = pos;
+        if (change.alt != null) out.alt = String(change.alt).slice(0, 200);
+        if (change.style != null) {
+          if (typeof change.style !== 'object' || Array.isArray(change.style)) fail(`${at}.style 必须是对象`, 'E_PATCH_SHAPE');
+          const style = {};
+          for (const [rawProp, rawValue] of Object.entries(change.style)) {
+            style[String(rawProp)] = String(rawValue ?? '');
+          }
+          out.style = style;
+        }
+        break;
+      }
       case 'removeNode':
         break;
       default:
@@ -229,6 +250,10 @@ export function summarizePatch(patch) {
         return '换内部 HTML';
       case 'insertHtml':
         return `${c.position} 插入`;
+      case 'insertImage': {
+        const where = { before: '前面', after: '后面', append: '内部末尾', prepend: '内部开头' }[c.position] ?? c.position;
+        return `图片插到${where}`;
+      }
       case 'removeNode':
         return '删除元素';
       default:

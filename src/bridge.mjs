@@ -225,7 +225,7 @@ export function installBridge({ win, doc, token }) {
     state: () => picker.state(),
 
     /** 选中元素的完整上下文（给模型用的 ContextEnvelope v1） */
-    getContext: ({ request = '', history = [], retry = null } = {}) => {
+    getContext: ({ request = '', history = [], retry = null, assets = [] } = {}) => {
       const el = picker.selectedPid ? anchor.resolve(picker.selectedPid) : null;
       if (!el) throw new ZError('当前没有选中元素', 'E_NO_SELECTION');
       const ctx = buildContext({
@@ -237,6 +237,7 @@ export function installBridge({ win, doc, token }) {
         history,
         names: customNames,
         retry,
+        assets,
       });
       invalidateNames();
       return ctx;
@@ -249,10 +250,10 @@ export function installBridge({ win, doc, token }) {
     },
 
     /** 预览：应用 patch，DOM 上立刻可见。同时把 inverse 交给父窗口以便精确回滚 */
-    applyPatch: ({ patch } = {}) => {
+    applyPatch: ({ patch, assets } = {}) => {
       const scopeEl = picker.selectedPid ? anchor.resolve(picker.selectedPid) : null;
       if (!scopeEl) throw new ZError('当前没有选中元素，无法应用改动', 'E_NO_SELECTION');
-      const result = applyPatch(doc, scopeEl, patch);
+      const result = applyPatch(doc, scopeEl, patch, { assets });
       invalidateNames(); // DOM 变了，缓存的人话名可能过期
       return {
         applied: result.applied,

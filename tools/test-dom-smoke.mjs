@@ -31,6 +31,11 @@ const promptModule = await import(SRC('systemprompt.mjs'));
 
 const SAMPLE = fs.readFileSync(path.join(ROOT, 'src', 'sample.html'), 'utf8');
 
+/** 一张 1×1 的合法 PNG（data URL），用来验证图片插入链路 */
+const TINY_PNG =
+  'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=';
+const ASSETS = { a1: { dataUrl: TINY_PNG, name: '咖啡.png', width: 1, height: 1 } };
+
 function fresh() {
   const { window, document } = parseDocument(SAMPLE);
   const anchor = new AnchorManager(document);
@@ -572,6 +577,157 @@ test('分词器：内联脚本里的 < 必须原样保留，不能当标签吃�
   // style/textarea 同理
   const { document: d2 } = parseDocument('<html><head><style>.a > .b { color: red }</style></head><body></body></html>');
   assert.ok(d2.querySelector('style').textContent.includes('.a > .b'), 'style 内容也要原样保留');
+});
+
+test('insertImage：四个位置都能把图片放对地方（before/after/append/prepend）', () => {
+  const { document, anchor } = fresh();
+  const h1 = document.querySelector('.hero h1');
+  const pid = anchor.pidOf(h1);
+  const parent = h1.parentElement;
+
+  // after：插到标题后面（成为兄弟）
+  const r1 = applyPatch(document, h1, { version: 1, target: pid, changes: [{ op: 'insertImage', target: pid, position: 'after', asset: 'a1', alt: '标题配图' }] }, { assets: ASSETS });
+  assert.equal(r1.applied.length, 1);
+  const img1 = h1.nextElementSibling;
+  assert.equal(img1.tagName, 'IMG', 'after 应插在标题后面');
+  assert.equal(img1.getAttribute('src'), TINY_PNG, '必须替换成真实的 data URL（模型只给 id）');
+  assert.equal(img1.getAttribute('alt'), '标题配图');
+  assert.ok(img1.getAttribute('data-pid'), '新插入的图片也要拿到锚点');
+  assert.ok(!img1.outerHTML.includes('data-z-asset'), '编辑器私有属性不能残留到页面里');
+  undoPatch(document, r1.inverse);
+  assert.equal(h1.nextElementSibling?.tagName, 'P', '撤销后应精确摘掉图片，后面还是原来的段落');
+  assert.ok(!parent.querySelector('img'), '撤销后不得残留任何 img');
+
+  // before：插到标题前面
+  const r2 = applyPatch(document, h1, { version: 1, target: pid, changes: [{ op: 'insertImage', target: pid, position: 'before', asset: 'a1' }] }, { assets: ASSETS });
+  assert.equal(h1.previousElementSibling?.tagName, 'IMG', 'before 应插在标题前面');
+  undoPatch(document, r2.inverse);
+  assert.equal(h1.previousElementSibling?.tagName, 'SPAN', '撤销后标题前面还是原来那个 span');
+
+  // prepend：插到标题内部开头
+  const r3 = applyPatch(document, h1, { version: 1, target: pid, changes: [{ op: 'insertImage', target: pid, position: 'prepend', asset: 'a1' }] }, { assets: ASSETS });
+  assert.equal(h1.firstElementChild.tagName, 'IMG', 'prepend 应插到标题内部开头');
+  undoPatch(document, r3.inverse);
+  assert.ok(!h1.querySelector('img'), '撤销后内部不应残留图片');
+
+  // append（默认）：不写 position 时插到选中元素内部末尾
+  const section = document.querySelector('.hero');
+  const spid = anchor.pidOf(section);
+  const r4 = applyPatch(document, section, { version: 1, target: spid, changes: [{ op: 'insertImage', target: spid, asset: 'a1' }] }, { assets: ASSETS });
+  assert.equal(section.lastElementChild?.tagName, 'IMG', '不写 position 时默认 append 到内部末尾');
+  undoPatch(document, r4.inverse);
+  assert.ok(!section.querySelector('img'));
+});
+
+test('insertImage：资源不存在/非法、样式白名单、越界都要被拦住', () => {
+  const { document, anchor } = fresh();
+  const h1 = document.querySelector('.hero h1');
+  const pid = anchor.pidOf(h1);
+
+  // ① 资源 id 不存在 → 明确报错，并把可用的 id 带在消息里（模型据此自我纠正）
+  assert.throws(
+    () => applyPatch(document, h1, { version: 1, target: pid, changes: [{ op: 'insertImage', target: pid, asset: 'a9' }] }, { assets: ASSETS }),
+    (err) => err.code === 'E_PATCH_UNKNOWN_ASSET' && /a1/.test(err.message),
+    '未知资源必须报 E_PATCH_UNKNOWN_ASSET 并列出可用 id',
+  );
+  // ② 没有带任何图片时也要说清楚
+  assert.throws(
+    () => applyPatch(document, h1, { version: 1, target: pid, changes: [{ op: 'insertImage', target: pid, asset: 'a1' }] }, {}),
+    (err) => err.code === 'E_PATCH_UNKNOWN_ASSET',
+  );
+  // ③ 不是图片的 data URL 不放行
+  assert.throws(
+    () =>
+      applyPatch(
+        document,
+        h1,
+        { version: 1, target: pid, changes: [{ op: 'insertImage', target: pid, asset: 'x' }] },
+        { assets: { x: { dataUrl: 'data:text/html;base64,PHNjcmlwdD4=' } } },
+      ),
+    (err) => err.code === 'E_PATCH_BAD_ASSET',
+    '非图片的 data URL 必须拦住',
+  );
+  // ④ 样式只走白名单，危险值（url()）直接丢弃
+  const r = applyPatch(
+    document,
+    h1,
+    {
+      version: 1,
+      target: pid,
+      changes: [
+        {
+          op: 'insertImage',
+          target: pid,
+          position: 'after',
+          asset: 'a1',
+          style: { width: '120px', 'border-radius': '8px', background: 'url(javascript:alert(1))', position: 'fixed', 'z-index': '9999' },
+        },
+      ],
+    },
+    { assets: ASSETS },
+  );
+  const img = h1.nextElementSibling;
+  assert.equal(img.style.getPropertyValue('width'), '120px');
+  assert.equal(img.style.getPropertyValue('border-radius'), '8px');
+  assert.ok(!img.getAttribute('style')?.includes('url('), '危险值必须被丢弃');
+  assert.ok(!img.getAttribute('style')?.includes('fixed'), '非白名单属性不写入');
+  undoPatch(document, r.inverse);
+  // 注意用 falsy 判断而不是 assert.equal(节点, null)：
+  // 后者失败时 Node 会去 inspect 整个 shim DOM 图，单条断言就能跑 90 秒然后抛 RangeError。
+  assert.ok(!h1.nextElementSibling?.tagName || h1.nextElementSibling.tagName !== 'IMG', '撤销后图片必须消失');
+});
+
+test('insertImage 的范围约束：允许插进选区内部的嵌套容器，拒绝插到选区之外', () => {
+  const { document, anchor } = fresh();
+  const section = document.querySelector('.hero');
+  const h1 = document.querySelector('.hero h1');
+  const spid = anchor.pidOf(section);
+  const hpid = anchor.pidOf(h1);
+
+  // ① 关键场景："选中整块区域，把图放在区域里那个标题的下面"
+  //    插入点的父节点是 .hero（就是 scope）→ 允许
+  const r1 = applyPatch(document, section, { version: 1, target: spid, changes: [{ op: 'insertImage', target: hpid, position: 'after', asset: 'a1' }] }, { assets: ASSETS });
+  assert.equal(h1.nextElementSibling?.tagName, 'IMG', '图应紧跟在选区内部的标题后面');
+  undoPatch(document, r1.inverse);
+  assert.ok(!section.querySelector('img'));
+
+  // ② 嵌套容器场景：选中更大的范围，插入点在更深的容器里（scope 的后代）→ 允许
+  const body = document.body;
+  const bpid = anchor.pidOf(body);
+  const r2 = applyPatch(document, body, { version: 1, target: bpid, changes: [{ op: 'insertImage', target: hpid, position: 'after', asset: 'a1' }] }, { assets: ASSETS });
+  assert.equal(h1.nextElementSibling?.tagName, 'IMG', '嵌套多层的插入点也要允许');
+  undoPatch(document, r2.inverse);
+
+  // ③ 真正必须拒绝的形态：目标在选区之外（想动祖先层）
+  const before = section.innerHTML;
+  assert.throws(
+    () => applyPatch(document, h1, { version: 1, target: spid, changes: [{ op: 'insertImage', target: spid, position: 'append', asset: 'a1' }] }, { assets: ASSETS }),
+    (err) => err.code === 'E_PATCH_OUT_OF_SCOPE',
+    '把图片插到选中区域之外必须拒绝',
+  );
+  assert.equal(section.innerHTML, before, '被拒时不允许留下任何改动');
+});
+
+test('带图的自然语言：离线引擎也能把"下面/上面/里面"翻译成插入位置', () => {
+  const { window, document, anchor } = fresh();
+  const h1 = document.querySelector('.hero h1');
+  const pid = anchor.pidOf(h1);
+  const base = { win: window, doc: document, el: h1, pid };
+  const withAssets = (request) => mockPatch({ ...buildContext({ ...base, request, assets: [{ id: 'a1', name: '咖啡.png', mime: 'image/png', width: 800, height: 600, bytes: 1024 }] }), request });
+
+  const after = withAssets('把这张图放在标题下面');
+  assert.equal(after.changes[0].op, 'insertImage');
+  assert.equal(after.changes[0].position, 'after');
+  assert.equal(after.changes[0].asset, 'a1');
+
+  assert.equal(withAssets('图片放在标题上面').changes[0].position, 'before');
+  assert.equal(withAssets('把图放进这块区域里面').changes[0].position, 'append');
+
+  // 上下文里只允许出现元数据，绝不能出现 base64
+  const ctx = buildContext({ ...base, request: '放张图', assets: [{ id: 'a1', name: '咖啡.png', mime: 'image/png', width: 1, height: 1, bytes: 8, dataUrl: TINY_PNG }] });
+  assert.equal(ctx.assets.length, 1);
+  assert.equal(ctx.assets[0].id, 'a1');
+  assert.ok(!JSON.stringify(ctx).includes('base64'), '上下文绝不能把 base64 递给模型');
 });
 
 test('干净导出必须剥掉编辑器注入的 bootstrap 脚本', () => {

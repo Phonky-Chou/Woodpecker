@@ -119,6 +119,34 @@ export function mockPatch(context) {
   const changes = [];
   const notes = [];
 
+  // 0) 带图 + 说位置：离线也要能演示"图片插到哪"
+  //    位置判断直接照自然语言里的方位词，和给真实模型的规则保持一致
+  const assets = Array.isArray(context?.assets) ? context.assets.filter((a) => a?.id) : [];
+  if (assets.length && /(图|图片|照片|截图|logo|配图|插画|海报)/i.test(req)) {
+    const pos = /(前面|上方|上面|之前|顶部|最上)/.test(req)
+      ? 'before'
+      : /(开头|最前|内部最前)/.test(req)
+        ? 'prepend'
+        : /(里面|内部|中间放|放进|放入|内部末尾|底部)/.test(req)
+          ? 'append'
+          : 'after';
+    const style = {};
+    if (/(小一点|小一些|缩小)/.test(req)) style['max-width'] = '240px';
+    else if (/(大一点|放大|满宽|全宽|铺满)/.test(req)) style.width = '100%';
+    if (/(圆角)/.test(req)) style['border-radius'] = '8px';
+    const change = { op: 'insertImage', target: pid, position: pos, asset: assets[0].id, alt: assets[0].name || '图片' };
+    if (Object.keys(style).length) change.style = style;
+    changes.push(change);
+    const where = { before: '前面', after: '后面', append: '内部末尾', prepend: '内部开头' }[pos];
+    notes.push(`图片插到${where}`);
+    return {
+      version: 1,
+      target: pid,
+      summary: `把图片${assets[0].name ? `「${assets[0].name}」` : ''}插到「${target.humanName ?? '选中元素'}」的${where}`,
+      changes,
+    };
+  }
+
   const wantBigger = /(大一点|更大|放大|大一些|变大|大点|加大|醒目|突出|bold|bigger|larger)/i.test(req);
   const wantSmaller = /(小一点|更小|缩小|小一些|变小|小点|less|smaller)/i.test(req);
   const curatedColor = pickColor(req);
@@ -302,13 +330,46 @@ async function callOpenAiCompatible({ endpoint, apiKey, model, messages, signal,
 }
 
 /** 通用"问模型 → 校验 → 失败自动重试一次"的流程 */
-async function generateViaChat({ context, callChat, onDelta }) {
+/**
+ * 组装用户消息。
+ *
+ * 有图片附件且开着"让模型看图"时，用 OpenAI 兼容的多模态格式：
+ *   [{type:'text',text}, {type:'image_url',image_url:{url:'data:image/png;base64,...'}}, ...]
+ * 关掉时只发文字 —— 图片的**位置决策**只靠自然语言也能做（模型只需要 assets[].id 和方位词）。
+ */
+function buildUserContent(context, assets) {
+  const text = buildUserInstruction(context);
+  const images = (Array.isArray(assets) ? assets : []).filter((a) => typeof a?.dataUrl === 'string' && a.dataUrl.startsWith('data:image/'));
+  if (!images.length) return text;
+  return [
+    { type: 'text', text },
+    ...images.map((a) => ({ type: 'image_url', image_url: { url: a.dataUrl } })),
+  ];
+}
+
+async function generateViaChat({ context, callChat, onDelta, assets }) {
+  const userContent = buildUserContent(context, assets);
   const messages = [
     { role: 'system', content: SYSTEM_PROMPT },
-    { role: 'user', content: buildUserInstruction(context) },
+    { role: 'user', content: userContent },
   ];
-  onDelta?.('正在请求模型…');
-  const first = await callChat(messages);
+  onDelta?.(userContent === buildUserInstruction(context) ? '正在请求模型…' : '正在请求模型（附带图片）…');
+  let first;
+  try {
+    first = await callChat(messages);
+  } catch (err) {
+    // 有些端点/模型不接受多模态消息（400 invalid content / vision）。带图失败就退回纯文字重试一次，
+    // 这样"贴了图但模型不支持看图"不会变成用户的死路 —— 位置判断本来也能只靠文字完成。
+    if (Array.isArray(userContent) && /image|content|vision|multimodal|400|invalid/i.test(String(err?.message ?? ''))) {
+      onDelta?.('该模型不接受图片输入，改为只发文字（图片插入位置仍按你的描述判断）…');
+      first = await callChat([
+        { role: 'system', content: SYSTEM_PROMPT },
+        { role: 'user', content: buildUserInstruction(context) },
+      ]);
+    } else {
+      throw err;
+    }
+  }
   try {
     const { patch } = parseModelOutput(first.content, context);
     return { raw: first.content, patch, usage: first.usage, attempts: 1, repaired: false };
@@ -347,11 +408,12 @@ export function createProvider({ kind = PROVIDERS.MOCK, endpoint, apiKey, model 
     return {
       kind,
       label: `Ollama (${model || 'qwen2.5:7b'})`,
-      async generate(context, { signal, onDelta } = {}) {
+      async generate(context, { signal, onDelta, assets } = {}) {
         const started = Date.now();
         const res = await generateViaChat({
           context,
           onDelta,
+          assets,
           callChat: (messages) => callOpenAiCompatible({ endpoint: url, model: model || 'qwen2.5:7b', messages, signal, jsonMode: true }),
         });
         return { ...res, provider: kind, ms: Date.now() - started };
@@ -364,14 +426,14 @@ export function createProvider({ kind = PROVIDERS.MOCK, endpoint, apiKey, model 
   return {
     kind: PROVIDERS.SERVER,
     label: `服务端模型 (${model || 'deepseek-chat'})`,
-    async generate(context, { signal, onDelta } = {}) {
+    async generate(context, { signal, onDelta, assets } = {}) {
       const started = Date.now();
       if (url.startsWith('/api/')) {
         onDelta?.('正在请求本地模型代理…');
         const res = await fetch(url, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ context, model }),
+          body: JSON.stringify({ context, model, assets: Array.isArray(assets) ? assets : [] }),
           signal,
         });
         const text = await res.text();
@@ -393,6 +455,7 @@ export function createProvider({ kind = PROVIDERS.MOCK, endpoint, apiKey, model 
       const res = await generateViaChat({
         context,
         onDelta,
+        assets,
         callChat: (messages) => callOpenAiCompatible({ endpoint: url, apiKey, model: model || 'deepseek-chat', messages, signal }),
       });
       return { ...res, provider: kind, ms: Date.now() - started };

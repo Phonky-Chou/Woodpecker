@@ -712,6 +712,154 @@ test('指代器开启时，应用自己的快捷键仍可用（Ctrl+Z / Ctrl+S �
   assert.equal(app.frame.contentWindow.__pageKeys, 0, '页面依然收不到按键');
 });
 
+/* ------------------------------ 图片附件（对话框贴图） ------------------------------ */
+
+/** 1×1 的合法 PNG，用来走通"贴图 → 说位置 → 真的插进页面"整条链路 */
+const TINY_PNG =
+  'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=';
+
+test('对话框贴图：加入后出现缩略图，移除后消失', async () => {
+  const app = await bootApp();
+  const a1 = app.addAsset({ dataUrl: TINY_PNG, name: '咖啡照片.png', width: 800, height: 600, bytes: 240 * 1024 });
+  assert.equal(a1.id, 'a1', '资源 id 应自动编号');
+  const thumbs = app.panelChat.thumbs.querySelectorAll('.z-thumb');
+  assert.equal(thumbs.length, 1, '输入区应出现一张缩略图');
+  assert.ok(app.panelChat.thumbs.querySelector('img')?.src.startsWith('data:image/png'), '缩略图用 data URL 显示');
+  assert.match(app.panelChat.thumbs.textContent, /咖啡照片/, '缩略图应显示文件名');
+  assert.match(app.panelChat.thumbs.textContent, /800×600/, '缩略图应显示像素尺寸');
+  assert.match(app.panelChat.thumbs.textContent, /KB/, '缩略图应显示体积');
+
+  // ✕ 移除
+  app.panelChat.thumbs.querySelector('.z-thumb-x').click();
+  await sleep(20);
+  assert.equal(app.assets.length, 0, '点 ✕ 应移除这张图');
+  assert.equal(app.panelChat.thumbs.querySelectorAll('.z-thumb').length, 0, '缩略图应消失');
+});
+
+test('对话框贴图：Ctrl+V/拖拽/选择文件都走 FileReader（浏览器路径）', async () => {
+  const app = await bootApp();
+  const win = app.__win;
+  // shim 里没有 FileReader：装一个假的，验证真实浏览器路径（读文件 → 登记资源）
+  win.FileReader = class {
+    readAsDataURL() {
+      setTimeout(() => {
+        this.result = TINY_PNG;
+        this.onload?.();
+      }, 0);
+    }
+  };
+  await app.ingestFiles([{ type: 'image/png', name: '粘贴的截图.png', size: 1234 }]);
+  await sleep(40);
+  assert.equal(app.assets.length, 1, '应通过 FileReader 读入并登记');
+  assert.equal(app.assets[0].name, '粘贴的截图.png');
+  assert.equal(app.assets[0].dataUrl, TINY_PNG);
+  // 非图片文件要拒掉
+  await app.ingestFiles([{ type: 'text/plain', name: 'a.txt', size: 10 }]);
+  await sleep(20);
+  assert.equal(app.assets.length, 1, '非图片文件不应被接纳');
+  delete win.FileReader;
+});
+
+test('贴图 + "放在标题下面" → 图片真的插到标题后面，且用真实 src', async () => {
+  const app = await bootApp();
+  const doc = app.frame.contentDocument;
+  const h1 = doc.querySelector('h1');
+  const pid = h1.getAttribute('data-pid');
+  await app.rpc('select', { pid });
+  app.addAsset({ dataUrl: TINY_PNG, name: '咖啡.png', width: 1, height: 1, bytes: 120 });
+
+  // 走离线引擎（Mock）——它的位置判断和给真实模型的规则一致
+  await app.send('把这张图放在标题下面');
+  await sleep(60);
+  assert.ok(app.preview, '应进入预览态');
+  const img = doc.querySelector('h1 + img') ?? [...doc.querySelectorAll('img')][0];
+  assert.ok(img, '页面里应出现插入的图片');
+  assert.equal(img.getAttribute('src'), TINY_PNG, 'src 必须是父窗口补上的真实 data URL');
+  assert.equal(h1.nextElementSibling?.tagName, 'IMG', '"下面"应插成标题的后一个兄弟');
+  assert.equal(app.assets.length, 0, '发送成功后待发送区应清空');
+  assert.ok(app.panelChat.thumbs.querySelectorAll('.z-thumb').length === 0, '缩略图也应清空');
+
+  // 接受后进入快照；撤销能精确摘掉
+  await app.acceptPreview();
+  await sleep(60);
+  await app.undo();
+  await sleep(80);
+  assert.ok(!app.frame.contentDocument.querySelector('img'), '撤销后图片应被摘掉（页面回到改动前）');
+});
+
+test('贴图上下文只给元数据：模型看不到 base64（几 MB 的图不会撑爆 prompt）', async () => {
+  const app = await bootApp();
+  const doc = app.frame.contentDocument;
+  const pid = doc.querySelector('h1').getAttribute('data-pid');
+  await app.rpc('select', { pid });
+  app.addAsset({ dataUrl: TINY_PNG, name: '咖啡.png', width: 800, height: 600, bytes: 240000 });
+
+  let seenContext = null;
+  let seenOptions = null;
+  app.provider = {
+    kind: 'fake',
+    label: '假模型',
+    async generate(context, options) {
+      seenContext = context;
+      seenOptions = options;
+      return { raw: '{}', patch: { version: 1, target: pid, summary: '不加改动', changes: [] } };
+    },
+  };
+  // changes 为空 → openPreview 会报"没有改动"，但上下文已经拿到了，足够断言
+  await app.send('放张图');
+  await sleep(40);
+
+  assert.equal(seenContext.assets.length, 1, '上下文要带上图片清单');
+  assert.equal(seenContext.assets[0].id, 'a1');
+  assert.equal(seenContext.assets[0].name, '咖啡.png');
+  assert.equal(seenContext.assets[0].width, 800);
+  assert.ok(!JSON.stringify(seenContext).includes('base64'), '上下文里绝不能出现 base64');
+  assert.ok(!JSON.stringify(seenContext).includes(TINY_PNG.slice(30, 60)), '上下文里不能出现图片数据片段');
+  // 图片本体是单独传给 provider 的（视觉模型看这张），不是塞在上下文里
+  assert.equal(seenOptions.assets.length, 1, 'data URL 应作为 provider 参数单独传（供视觉模型）');
+  assert.equal(seenOptions.assets[0].dataUrl, TINY_PNG);
+
+  // 关掉"让模型看图" → 不再把图发给模型
+  app.clearAssets();
+  app.panelChat.visionChk.checked = false;
+  app.panelChat.visionChk.dispatchEvent({ type: 'change' });
+  app.addAsset({ dataUrl: TINY_PNG, name: 'b.png', width: 1, height: 1, bytes: 100 });
+  await app.send('放张图');
+  await sleep(40);
+  assert.equal(seenOptions.assets.length, 0, '关掉看图后不应把图片发给模型');
+  assert.equal(seenContext.assets.length, 1, '但清单仍要告诉模型（位置决策不需要看图）');
+});
+
+test('贴图自愈：模型写了不存在的图片 id，会被回喂可用 id 后自我纠正', async () => {
+  const app = await bootApp();
+  const doc = app.frame.contentDocument;
+  const h1 = doc.querySelector('h1');
+  const pid = h1.getAttribute('data-pid');
+  await app.rpc('select', { pid });
+  app.addAsset({ dataUrl: TINY_PNG, name: '咖啡.png', width: 1, height: 1, bytes: 120 });
+
+  let calls = 0;
+  let sawAllowed = null;
+  app.provider = {
+    kind: 'fake',
+    label: '假模型',
+    async generate(context) {
+      calls++;
+      if (calls === 1) {
+        return { raw: '{}', patch: { version: 1, target: pid, summary: '用错 id', changes: [{ op: 'insertImage', target: pid, position: 'after', asset: 'a9' }] } };
+      }
+      sawAllowed = context.retry?.allowedAssets ?? null;
+      return { raw: '{}', patch: { version: 1, target: pid, summary: '改对了', changes: [{ op: 'insertImage', target: pid, position: 'after', asset: 'a1' }] } };
+    },
+  };
+  await app.send('把这张图放在标题下面');
+  await sleep(60);
+  assert.equal(calls, 2, '应自动重试一次');
+  assert.ok(sawAllowed?.includes('a1'), `重试时要把可用的图片 id 告诉模型，实际=${JSON.stringify(sawAllowed)}`);
+  assert.ok(app.preview, '重试后应进入预览态');
+  assert.equal(doc.querySelector('h1').nextElementSibling?.tagName, 'IMG', '图片应插进页面');
+});
+
 test.after?.(() => {});
 
 process.on('exit', () => cleanupDomShim());

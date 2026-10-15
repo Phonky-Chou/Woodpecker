@@ -362,6 +362,32 @@ body { background: var(--z-bg); }
   border: 1px solid var(--z-border); border-radius: 4px; padding: 0 4px; margin-left: auto;
 }
 
+/* 图片附件（像 DeepSeek 的对话框那样贴图） */
+.z-attach-bar { display: flex; gap: 8px; align-items: center; margin-bottom: 7px; }
+.z-attach-bar .z-btn { font-size: 11.5px; padding: 3px 9px; }
+.z-vision {
+  display: inline-flex; align-items: center; gap: 5px; font-size: 11px; color: var(--z-dim);
+  cursor: pointer; user-select: none;
+}
+.z-vision input { accent-color: var(--z-accent); }
+.z-attach-row { display: none; }
+.z-attach-row.z-on { display: block; margin-top: 8px; }
+.z-thumbs { display: flex; gap: 8px; flex-wrap: wrap; }
+.z-thumb {
+  position: relative; display: flex; gap: 7px; align-items: center; max-width: 100%;
+  border: 1px solid var(--z-border); background: var(--z-panel-2); border-radius: 8px; padding: 5px 22px 5px 5px;
+}
+.z-thumb img { width: 38px; height: 38px; object-fit: cover; border-radius: 5px; background: #0c1119; }
+.z-thumb-meta { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.z-thumb-meta b { font-size: 11px; font-weight: 600; color: var(--z-text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 150px; }
+.z-thumb-meta span { font-size: 10px; color: var(--z-dim-2); font-family: var(--z-mono); }
+.z-thumb-x {
+  position: absolute; top: 3px; right: 3px; width: 16px; height: 16px; line-height: 14px; text-align: center;
+  border: 0; border-radius: 50%; background: #2a3441; color: var(--z-dim); cursor: pointer; font-size: 10px; padding: 0;
+}
+.z-thumb-x:hover { background: #4a2730; color: #ffb3b3; }
+.z-composer.z-drop-hot .z-ta { border-color: var(--z-accent); box-shadow: 0 0 0 3px rgba(76,141,255,.2); }
+
 /* 版本历史 */
 .z-versions { flex: 1; overflow-y: auto; padding: 10px; min-height: 0; }
 .z-ver {

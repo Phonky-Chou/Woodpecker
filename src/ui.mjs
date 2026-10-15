@@ -48,6 +48,32 @@ export class ChatPanel {
     this.ta = el('textarea', 'z-ta');
     this.ta.placeholder = '先用指代器选中一个元素，然后在这里说你想怎么改…';
     this.ta.disabled = true;
+
+    /**
+     * 图片区（像 DeepSeek 那样贴图）：
+     * 缩略图 + 文件名 + 大小 + ✕ 移除；支持 📎 选择、Ctrl+V 粘贴、拖拽进输入区。
+     */
+    this.attachRow = el('div', 'z-attach-row');
+    this.attachRow.dataset.el = 'attach-row';
+    this.thumbs = el('div', 'z-thumbs');
+    this.thumbs.dataset.el = 'attach-thumbs';
+    this.attachRow.appendChild(this.thumbs);
+    this.fileInput = el('input', 'z-hidden');
+    this.fileInput.type = 'file';
+    this.fileInput.accept = 'image/png,image/jpeg,image/gif,image/webp,image/bmp';
+    this.fileInput.multiple = true;
+    this.attachBtn = el('button', 'z-btn', '🖼 图片');
+    this.attachBtn.title = '加一张图片（也可以直接 Ctrl+V 粘贴截图，或把图片拖进来）';
+    this.visionWrap = el('label', 'z-vision');
+    this.visionWrap.title = '开启后会把图片一起发给模型（需要视觉模型）；关掉则只让模型按你的话决定插入位置';
+    this.visionChk = el('input', 'z-hidden');
+    this.visionChk.type = 'checkbox';
+    this.visionChk.checked = true;
+    this.visionWrap.append(this.visionChk, el('span', '', '让模型看图'));
+    const attachBar = el('div', 'z-attach-bar');
+    attachBar.append(this.attachBtn, this.visionWrap);
+    this.composer.append(attachBar);
+
     this.row = el('div', 'z-composer-row');
     this.sendBtn = el('button', 'z-btn primary', '生成改动');
     this.sendBtn.disabled = true;
@@ -56,18 +82,83 @@ export class ChatPanel {
     this.row.append(this.sendBtn, this.settingsBtn, this.kbd);
     this.chips = el('div', 'z-chips');
     this.chips.dataset.el = 'chips';
-    this.composer.append(this.ta, this.row, this.chips);
+    this.composer.append(this.ta, this.row, this.chips, this.attachRow, this.fileInput);
     this.root.appendChild(this.composer);
     this.renderChips(['大一点', '小一点', '换个颜色', '加个阴影']); // 未选中时的通用兜底
 
+    this.attachBtn.addEventListener('click', () => this.fileInput.click());
+    this.fileInput.addEventListener('change', () => {
+      const files = [...(this.fileInput.files ?? [])];
+      if (files.length) this.handlers.onAttachFiles?.(files);
+      this.fileInput.value = '';
+    });
+    this.visionChk.addEventListener('change', () => this.handlers.onVisionToggle?.(this.visionChk.checked));
+    // 粘贴截图（像 DeepSeek 一样直接 Ctrl+V）
+    this.ta.addEventListener('paste', (e) => {
+      const items = [...(e.clipboardData?.items ?? [])];
+      const files = items.filter((it) => it.kind === 'file' && /^image\//.test(it.type)).map((it) => it.getAsFile()).filter(Boolean);
+      if (files.length) {
+        e.preventDefault();
+        this.handlers.onAttachFiles?.(files);
+      }
+    });
+    // 拖拽进输入区
+    const onDrop = (e) => {
+      const files = [...(e.dataTransfer?.files ?? [])].filter((f) => /^image\//.test(f.type));
+      if (!files.length) return;
+      e.preventDefault();
+      this.composer.classList.remove('z-drop-hot');
+      this.handlers.onAttachFiles?.(files);
+    };
+    this.ta.addEventListener('dragover', (e) => {
+      if ([...(e.dataTransfer?.items ?? [])].some((it) => it.kind === 'file')) {
+        e.preventDefault();
+        this.composer.classList.add('z-drop-hot');
+      }
+    });
+    this.ta.addEventListener('dragleave', () => this.composer.classList.remove('z-drop-hot'));
+    this.ta.addEventListener('drop', onDrop);
+
     this.sendBtn.addEventListener('click', () => this.handlers.onSend?.(this.ta.value));
-    this.settingsBtn.addEventListener('click', () => this.handlers.onSettings?.());
-    this.ta.addEventListener('keydown', (e) => {
+    this.settingsBtn.addEventListener('click', () => this.handlers.onSettings?.());    this.ta.addEventListener('keydown', (e) => {
       if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
         e.preventDefault();
         this.handlers.onSend?.(this.ta.value);
       }
     });
+  }
+
+  /* ------------------------------ 附件缩略图 ------------------------------ */
+
+  /**
+   * 渲染待发送的图片（像 DeepSeek 的输入框那样）。
+   * @param {Array<{id:string,name:string,bytes:number,width?:number,height?:number,dataUrl:string}>} assets
+   */
+  renderAttachments(assets = []) {
+    this.attachments = assets;
+    const has = assets.length > 0;
+    this.attachRow.classList.toggle('z-on', has);
+    this.thumbs.innerHTML = '';
+    for (const a of assets) {
+      const card = el('div', 'z-thumb');
+      card.dataset.asset = a.id;
+      const img = document.createElement('img');
+      img.src = a.dataUrl;
+      img.alt = a.name;
+      const meta = el('div', 'z-thumb-meta');
+      meta.innerHTML =
+        `<b>${escapeHtml(truncate(a.name, 18))}</b>` +
+        `<span>${a.width && a.height ? `${a.width}×${a.height} · ` : ''}${formatBytes(a.bytes)}</span>`;
+      const rm = el('button', 'z-thumb-x', '✕');
+      rm.title = '移除这张图';
+      rm.addEventListener('click', () => this.handlers.onRemoveAsset?.(a.id));
+      card.append(img, meta, rm);
+      this.thumbs.appendChild(card);
+    }
+  }
+
+  setVision(on) {
+    if (this.visionChk) this.visionChk.checked = !!on;
   }
 
   /* ------------------------------ 选区卡片 ------------------------------ */

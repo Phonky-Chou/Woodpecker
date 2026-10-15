@@ -80,6 +80,15 @@ async function handleChat(req, res) {
   const context = payload.context;
   if (!context?.target?.pid) return json(res, 400, { error: '缺少 context.target.pid' });
 
+  // 用户从对话框带进来的图片（data URL）。只在"让模型看图"开着时才发，
+  // 且**只发给模型，不进上下文 JSON** —— 位置决策靠 context.assets 里的 id 与方位词。
+  const images = (Array.isArray(payload.assets) ? payload.assets : [])
+    .filter((a) => typeof a?.dataUrl === 'string' && a.dataUrl.startsWith('data:image/'))
+    .map((a) => a.dataUrl);
+  const userContent = images.length
+    ? [{ type: 'text', text: buildUserInstruction(context) }, ...images.map((url) => ({ type: 'image_url', image_url: { url } }))]
+    : buildUserInstruction(context);
+
   const model = payload.model || MODEL;
   const mode = API_KEY ? 'server' : 'no-key';
 
@@ -97,26 +106,41 @@ async function handleChat(req, res) {
     });
   }
 
-  const body = {
+  const buildBody = (content) => ({
     model,
     messages: [
       { role: 'system', content: SYSTEM_PROMPT },
-      { role: 'user', content: buildUserInstruction(context) },
+      { role: 'user', content },
     ],
     temperature: 0.2,
     max_tokens: 2000,
     response_format: { type: 'json_object' },
-  };
+  });
+  let body = buildBody(userContent);
 
   let upstream;
-  try {
-    upstream = await fetch(`${BASE_URL}/chat/completions`, {
+  const send = async (b) => {
+    const r = await fetch(`${BASE_URL}/chat/completions`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${API_KEY}` },
-      body: JSON.stringify(body),
+      body: JSON.stringify(b),
     });
+    return { res: r, text: await r.text() };
+  };
+  try {
+    upstream = await send(body);
   } catch (err) {
     return json(res, 502, { error: `连不上模型端点 ${BASE_URL}：${err.message}` });
+  }
+  // 有些端点/模型不接受多模态消息：带图被 4xx 拒了就退回纯文字重发一次，
+  // 否则"贴了图但模型不支持看图"会变成死路。
+  if (images.length && upstream.res.status >= 400 && /image|content|vision|multimodal|invalid/i.test(upstream.text)) {
+    body = buildBody(buildUserInstruction(context));
+    try {
+      upstream = await send(body);
+    } catch (err) {
+      return json(res, 502, { error: `连不上模型端点 ${BASE_URL}：${err.message}` });
+    }
   }
 
   const text = await upstream.text();

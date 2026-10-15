@@ -783,7 +783,7 @@ const MAX_CHANGES = 50;
 const MAX_HTML_BYTES = 60 * 1024;
 
 
-const OPS = ['setStyle', 'setText', 'setAttr', 'setHtml', 'insertHtml', 'removeNode'];
+const OPS = ['setStyle', 'setText', 'setAttr', 'setHtml', 'insertHtml', 'insertImage', 'removeNode'];
 
 const INSERT_POSITIONS = ['before', 'after', 'append', 'prepend'];
 
@@ -955,6 +955,27 @@ function validatePatchShape(raw) {
         out.html = change.html;
         break;
       }
+      case 'insertImage': {
+        // 用户从对话框带进来的图片：模型只需要给出"放哪"和"用哪张"，
+        // 资源本体（data URL）由父窗口在应用时补上，绝不让模型碰 base64。
+        const asset = String(change.asset ?? change.assetId ?? change.image ?? '').trim();
+        if (!asset) fail(`${at}.asset 必填（用 context.assets[].id 指定要插入的图片）`, 'E_PATCH_SHAPE');
+        out.asset = asset;
+        // 图片默认落在选中元素**内部末尾**（不写位置时不要插到选区外面去）
+        const pos = String(change.position ?? change.pos ?? 'append').toLowerCase();
+        if (!INSERT_POSITIONS.includes(pos)) fail(`${at}.position 只能是 ${INSERT_POSITIONS.join(' / ')}`, 'E_PATCH_SHAPE');
+        out.position = pos;
+        if (change.alt != null) out.alt = String(change.alt).slice(0, 200);
+        if (change.style != null) {
+          if (typeof change.style !== 'object' || Array.isArray(change.style)) fail(`${at}.style 必须是对象`, 'E_PATCH_SHAPE');
+          const style = {};
+          for (const [rawProp, rawValue] of Object.entries(change.style)) {
+            style[String(rawProp)] = String(rawValue ?? '');
+          }
+          out.style = style;
+        }
+        break;
+      }
       case 'removeNode':
         break;
       default:
@@ -1010,6 +1031,10 @@ function summarizePatch(patch) {
         return '换内部 HTML';
       case 'insertHtml':
         return `${c.position} 插入`;
+      case 'insertImage': {
+        const where = { before: '前面', after: '后面', append: '内部末尾', prepend: '内部开头' }[c.position] ?? c.position;
+        return `图片插到${where}`;
+      }
       case 'removeNode':
         return '删除元素';
       default:
@@ -1314,10 +1339,24 @@ __Z_DEF("patch.mjs", function (exports, __Z_REQ) {
  * 可能被另一个 setHtml 覆盖，零碎回滚顺序一错就还原不干净。
  */
 const { AnchorManager, PID_ATTR } = __Z_REQ("anchor.mjs");
-const { validatePatchShape, validatePatchScope } = __Z_REQ("schema.mjs");
+const { validatePatchShape, validatePatchScope, STYLE_WHITELIST } = __Z_REQ("schema.mjs");
 const { ZError, uid } = __Z_REQ("util.mjs");
 const DANGEROUS_TAGS = new Set(['SCRIPT', 'IFRAME', 'OBJECT', 'EMBED', 'LINK', 'META', 'BASE', 'FORM', 'STYLE']);
 const SAFE_URL = /^(?:https?:|mailto:|tel:|#|\/|\.\/|\.\.\/|data:image\/)/i;
+
+/**
+ * 插入图片允许的样式属性（STYLE_WHITELIST 的收窄子集）。
+ * 明确排除 position / inset / z-index / float / display：这些会把图片拽出文档流、盖住整页，
+ * 而 insertImage 的语义是"把图放在用户指的那块位置附近"。
+ */
+const INSERT_IMAGE_STYLE_OK = new Set([
+  'width', 'height', 'max-width', 'max-height', 'min-width', 'min-height',
+  'margin', 'margin-top', 'margin-right', 'margin-bottom', 'margin-left',
+  'padding', 'padding-top', 'padding-right', 'padding-bottom', 'padding-left',
+  'border', 'border-width', 'border-style', 'border-color', 'border-radius', 'box-shadow',
+  'object-fit', 'object-position', 'aspect-ratio', 'opacity', 'filter', 'transform', 'transform-origin',
+  'background', 'background-color', 'mix-blend-mode', 'vertical-align', 'box-sizing',
+]);
 
 /** 判断某个属性名是否属于"编辑器自身"（高亮/预览标记），导出与快照前会剥掉。 */
 
@@ -1525,14 +1564,81 @@ function removeInsertedNodes(entry) {
 }
 
 /**
+ * 把 insertImage 归一成一条 insertHtml。
+ *
+ * 为什么要有一等公民的 insertImage：图片是"带资源"的插入，用户的需求（"把这张图放在标题下面"）
+ * 本质就是**位置**问题。让模型输出结构化位置，比让它拼 `<img src="data:...">` 可靠得多：
+ *  - 模型永远拿不到也写不出 base64（几 MB 的图会撑爆 prompt，而且它必然抄错）；
+ *  - 资源 id 必须真实存在，写错会被明确拒回并让模型重试；
+ *  - 位置词（before/after/append/prepend）与 insertHtml 完全一致，范围约束也照旧生效。
+ *
+ * @param {object} change 形如 { op:'insertImage', target, position, asset, alt?, style? }
+ * @param {Record<string, {dataUrl:string, name?:string, width?:number, height?:number}>} assets
+ */
+
+function normalizeInsertImage(change, assets, doc) {
+  const assetId = String(change.asset ?? '').trim();
+  const asset = assetId && assets ? assets[assetId] : null;
+  if (!asset?.dataUrl) {
+    const known = assets ? Object.keys(assets) : [];
+    throw new ZError(
+      `找不到图片资源 ${assetId || '(空)'}${known.length ? `，可用的是：${known.join(', ')}` : '（本次没有附带图片）'}`,
+      'E_PATCH_UNKNOWN_ASSET',
+      change,
+    );
+  }
+  if (!/^data:image\/(png|jpeg|jpg|gif|webp|bmp);base64,/i.test(String(asset.dataUrl))) {
+    throw new ZError(`图片资源 ${assetId} 不是合法的内嵌图片`, 'E_PATCH_BAD_ASSET', change);
+  }
+
+  // 只保留白名单内的样式属性，避免模型借 style 绕过策略。
+  // 注意这里用的是"插入图片"的收窄白名单：position / z-index / inset 之类会把图片从文档流里拽出来
+  // 盖在整页上（setStyle 的白名单里允许它们，但那是针对已有元素的微调）。
+  const styleText = (() => {
+    const style = change.style && typeof change.style === 'object' ? change.style : null;
+    if (!style) return '';
+    const parts = [];
+    for (const [rawProp, rawValue] of Object.entries(style)) {
+      const prop = String(rawProp).toLowerCase().trim();
+      const value = String(rawValue ?? '').trim();
+      if (!value || /url\s*\(|expression\s*\(|javascript\s*:/i.test(value)) continue;
+      if (!STYLE_WHITELIST.has(prop) || !INSERT_IMAGE_STYLE_OK.has(prop)) continue;
+      parts.push(`${prop}:${value}`);
+    }
+    return parts.join(';');
+  })();
+
+  const attr = (v) =>
+    String(v ?? '')
+      .replace(/&/g, '&amp;')
+      .replace(/"/g, '&quot;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;');
+
+  const alt = attr(change.alt ?? asset.name ?? '图片');
+  const styleAttr = styleText ? ` style="${attr(styleText)}"` : '';
+  return {
+    ...change,
+    op: 'insertHtml',
+    // 默认 append（放进选中元素内部末尾），与系统提示词里给模型的约定一致：
+    // "用户没说位置"时图片应该落在用户选中的那块东西**里面**，而不是插到它外面去。
+    position: change.position ?? 'append',
+    html: `<img src="${asset.dataUrl}" alt="${alt}"${styleAttr}>`,
+  };
+}
+
+/**
  * 应用 patch。
  * @param {Document} doc
  * @param {Element} scopeEl 选中的元素（范围边界）
  * @param {object} rawPatch 模型输出
+ * @param {{assets?: Record<string, {dataUrl:string,name?:string}>}} [options]
+ *        assets：用户从对话框带进来的图片（id → 内嵌 data URL），仅供 insertImage 使用
  * @returns {{applied:Array, inverse:Array, anchor:AnchorManager, patch:object}}
  */
 
-function applyPatch(doc, scopeEl, rawPatch) {
+function applyPatch(doc, scopeEl, rawPatch, options = {}) {
+  const assets = options.assets ?? null;
   if (!scopeEl) throw new ZError('没有选中元素，无法应用改动', 'E_NO_SELECTION');
   const anchor = new AnchorManager(doc);
   anchor.rescan();
@@ -1558,7 +1664,10 @@ function applyPatch(doc, scopeEl, rawPatch) {
   // 但 apply 过程中仍可能出错（例如前面的 removeNode 删掉了后续要改的节点），
   // 这时必须逆序回滚已应用的改动，否则会留下"改了一半"的页面。
   try {
-    for (const change of patch.changes) {
+    for (const rawChange of patch.changes) {
+      // insertImage 归一到 insertHtml：图片就是"带资源的插入"，位置语义（before/after/append/prepend）
+      // 与范围约束完全一样，没必要写第二套插入逻辑。
+      const change = rawChange.op === 'insertImage' ? normalizeInsertImage(rawChange, assets, doc) : rawChange;
       const el = findByPid(doc, anchor, change.target);
       const scope = resolveScope();
       // scope 为 null ⇒ 本 patch 已经把选中元素自己删掉了（removeNode target=scope）。
@@ -1608,18 +1717,20 @@ function applyPatch(doc, scopeEl, rawPatch) {
 
         // 范围硬约束：插入**结果**必须落在选区里，只留一个合情理的例外。
         //   - append/prepend：插到 target 内部，target 已被范围校验覆盖，天然在选区内；
-        //   - before/after：插成 target 的兄弟。允许的条件是二者之一：
-        //       a) 插入点的父节点在 scope 内（scope 自身或其后代）——插进选区内部；
-        //       b) target 就是选中元素本身，且插入点父节点 = 该元素的父节点——"在这块旁边加东西"（用户诉求）。
-        //     其余情况（例如选中卡片里的 <h3> 却把节点插到卡片外层）都是插到选区之外 → 整单拒绝。
+        //   - before/after：插成 target 的兄弟。允许的条件是三者之一：
+        //       a) 插入点的父节点就是 scope —— 直接插进选区；
+        //       b) scope 包含插入点的父节点 —— 插进**选区内部的嵌套容器**
+        //          （关键场景："把这张图放在卡片里的标题下面"：选中整块卡片，插入点是卡片里的 h1 的父节点）；
+        //       c) target 就是选中元素本身，且插入点父节点 = 该元素的父节点 —— "在这块旁边加东西"。
+        //     其余情况（把节点插到选区之外，例如挂到选区的祖先上）整单拒绝。
         if (change.position === 'before' || change.position === 'after') {
           const scope = resolveScope();
           const insertParent = el.parentNode;
-          // 落点在选区内 ⇔ 插入点的父节点就是 scope，或它是 scope 的祖先（ancestor.contains(scope)）。
           const insideScope =
             !!scope &&
             insertParent != null &&
-            (insertParent === scope || (typeof insertParent.contains === 'function' && insertParent.contains(scope)));
+            (insertParent === scope ||
+              (typeof scope.contains === 'function' && scope.contains(insertParent)));
           const besideSelection = !!scope && el === scope && insertParent != null && insertParent === scope.parentNode;
           if (!insideScope && !besideSelection) {
             throw new ZError(
@@ -1810,6 +1921,7 @@ exports["patchStats"] = exports["patchStats"] ?? (typeof patchStats !== 'undefin
 exports["isEditorArtifactAttr"] = exports["isEditorArtifactAttr"] ?? (typeof isEditorArtifactAttr !== 'undefined' ? isEditorArtifactAttr : undefined);
 exports["sanitizeHtmlFragment"] = exports["sanitizeHtmlFragment"] ?? (typeof sanitizeHtmlFragment !== 'undefined' ? sanitizeHtmlFragment : undefined);
 exports["scrubEditorArtifacts"] = exports["scrubEditorArtifacts"] ?? (typeof scrubEditorArtifacts !== 'undefined' ? scrubEditorArtifacts : undefined);
+exports["normalizeInsertImage"] = exports["normalizeInsertImage"] ?? (typeof normalizeInsertImage !== 'undefined' ? normalizeInsertImage : undefined);
 exports["applyPatch"] = exports["applyPatch"] ?? (typeof applyPatch !== 'undefined' ? applyPatch : undefined);
 exports["undoPatch"] = exports["undoPatch"] ?? (typeof undoPatch !== 'undefined' ? undoPatch : undefined);
 exports["PreviewSession"] = exports["PreviewSession"] ?? (typeof PreviewSession !== 'undefined' ? PreviewSession : undefined);
@@ -1925,7 +2037,7 @@ function matchedCssRules(win, doc, el, limit = 24) {
  * @param {Array} p.history 之前几轮对话（role/text）
  */
 
-function buildContext({ win, doc, el, pid, request, history = [], names = null, retry = null, maxHtmlBytes = 24 * 1024 }) {
+function buildContext({ win, doc, el, pid, request, history = [], names = null, retry = null, assets = [], maxHtmlBytes = 24 * 1024 }) {
   const chain = [];
   let cur = el;
   while (cur && cur.nodeType === 1 && chain.length < 12) {
@@ -1997,7 +2109,20 @@ function buildContext({ win, doc, el, pid, request, history = [], names = null, 
       descendantCount: el.querySelectorAll('*').length,
     },
     request: String(request ?? ''),
-    // 上一次被拒绝时的反馈（父窗口在"越界"后自动补上，让模型知道该怎么改）
+    // 用户从对话框带进来的图片：**只给元数据**（id/名称/尺寸/大小），不给 base64 ——
+    // 模型只需要"用哪张、放哪里"，图片本体由父窗口在应用 patch 时补上。
+    assets: (Array.isArray(assets) ? assets : [])
+      .slice(0, 6)
+      .map((a) => ({
+        id: String(a?.id ?? ''),
+        name: String(a?.name ?? '').slice(0, 60),
+        mime: String(a?.mime ?? ''),
+        width: Number(a?.width) || null,
+        height: Number(a?.height) || null,
+        bytes: Number(a?.bytes) || null,
+      }))
+      .filter((a) => a.id),
+    // 上一次被拒绝时的反馈（父窗口在"越界/资源不存在"后自动补上，让模型知道该怎么改）
     retry: retry && typeof retry === 'object' ? retry : null,
     history: (history ?? []).slice(-6),
   };
@@ -2609,7 +2734,7 @@ function installBridge({ win, doc, token }) {
     state: () => picker.state(),
 
     /** 选中元素的完整上下文（给模型用的 ContextEnvelope v1） */
-    getContext: ({ request = '', history = [], retry = null } = {}) => {
+    getContext: ({ request = '', history = [], retry = null, assets = [] } = {}) => {
       const el = picker.selectedPid ? anchor.resolve(picker.selectedPid) : null;
       if (!el) throw new ZError('当前没有选中元素', 'E_NO_SELECTION');
       const ctx = buildContext({
@@ -2621,6 +2746,7 @@ function installBridge({ win, doc, token }) {
         history,
         names: customNames,
         retry,
+        assets,
       });
       invalidateNames();
       return ctx;
@@ -2633,10 +2759,10 @@ function installBridge({ win, doc, token }) {
     },
 
     /** 预览：应用 patch，DOM 上立刻可见。同时把 inverse 交给父窗口以便精确回滚 */
-    applyPatch: ({ patch } = {}) => {
+    applyPatch: ({ patch, assets } = {}) => {
       const scopeEl = picker.selectedPid ? anchor.resolve(picker.selectedPid) : null;
       if (!scopeEl) throw new ZError('当前没有选中元素，无法应用改动', 'E_NO_SELECTION');
-      const result = applyPatch(doc, scopeEl, patch);
+      const result = applyPatch(doc, scopeEl, patch, { assets });
       invalidateNames(); // DOM 变了，缓存的人话名可能过期
       return {
         applied: result.applied,

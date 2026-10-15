@@ -16,13 +16,13 @@ cd C:\Users\Windows\Documents\deepseek-harness\default-workspace\zhidaiqi
 node tools/build.mjs
 node tools/test-naming.mjs        # 16 项 命名引擎（界面"说人话"）
 node tools/test-unit.mjs         # 32 项
-node tools/test-dom-smoke.mjs    # 27 项
-node tools/test-app-wiring.mjs   # 21 项（应用级接线 + 工具条行为，最关键）
+node tools/test-dom-smoke.mjs    # 31 项
+node tools/test-app-wiring.mjs   # 26 项（应用级接线 + 工具条行为，最关键）
 node tools/test-bundle.mjs       # 12 项
 ```
 
-合计 **108 项，0 失败**。改了 `src/` 必须重新构建，否则 `test-bundle` 会直接报"产物过期"。
-另有页面内自检 **27 项**（浏览器里点「更多 ▾ → 🧪 页面内自检」）。
+合计 **117 项，0 失败**。改了 `src/` 必须重新构建，否则 `test-bundle` 会直接报"产物过期"。
+另有页面内自检 **28 项**（浏览器里点「更多 ▾ → 🧪 页面内自检」）。
 
 ### A-1. 界面语言优化（`test-naming.mjs` 16 项 + `test-app-wiring.mjs` 5 项）
 
@@ -42,6 +42,23 @@ node tools/test-bundle.mjs       # 12 项
 | 布局 | 应用根容器撑满视口（`.z-app` = 100dvh 栅格），**底部不留白边** |
 | 交互 | **松手后选择界面必须留在页面上**（"已选中工具条"），`让 AI 改这块 / 改名 / 复制 / ✕` 都能点到；按住时移到弹层上会"钉住" |
 | R6 | **交互隔离**：指代器开启时页面收不到任何输入（改到容器/`document`/`window` 上的点击与按键一律不触发），关闭后页面功能完全恢复；开启时仍能滚动、应用快捷键仍可用 |
+| R7 | **对话框贴图 + 位置决策**：输入区可加图（选择/粘贴/拖拽，带缩略图与移除）；AI 按自然语言判断插到哪（下面/上面/里面/前面）；图片只能落在选区内；本体由编辑器补上（上下文里没有 base64）；大图自动压缩 |
+
+### A-2b. 图片插入（`test-dom-smoke.mjs` 4 项 + `test-app-wiring.mjs` 5 项 + 页面内自检 1 项）
+
+| 验的是什么 | 断言 |
+| --- | --- |
+| 四个位置都放对 | `before`/`after` 插成兄弟、`append`/`prepend` 插进内部；不写 `position` 默认 `append` |
+| 资源校验 | id 不存在 → `E_PATCH_UNKNOWN_ASSET`（消息里列出可用 id）；没带图 → 同样报错；非图片 data URL → `E_PATCH_BAD_ASSET` |
+| 样式收窄白名单 | `width`/`border-radius` 写入；`url(...)` 值丢弃；`position:fixed`、`z-index` 丢弃（不许把图拽出文档流盖住整页） |
+| 范围约束 | 允许"插进选区内部的嵌套容器"（选中整块、把图放到里面某个标题下面）；插到选区之外整单拒绝且 DOM 零改动 |
+| 撤销 | 撤销后精确摘掉图片、不留残渣（`.hero` 里的兄弟关系不变） |
+| 上下文只给元数据 | `context.assets` 有 id/名称/尺寸/体积；**整份上下文里不出现 base64** |
+| 图片单独传给模型 | `provider.generate(context, { assets })` 拿到 data URL（供视觉模型）；关掉"让模型看图"后不再传 |
+| 自愈 | 模型写了不存在的图片 id → 自动重试一次，并把可用 id 回喂给模型 |
+| 端到端 | 贴图 + "放在标题下面" → 图片真的插进 iframe DOM，`src` 是父窗口补的真实 data URL；发送后待发送区清空；接受后撤销能摘掉 |
+| 离线引擎 | 带图且说方位词时，Mock 也按"下面/上面/里面"给出对应 `position`（离线可演示、可测） |
+
 
 ### A-2. 交互隔离（`test-app-wiring.mjs` 3 项 + 页面内自检 1 项）
 

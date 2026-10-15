@@ -102,7 +102,7 @@ export function matchedCssRules(win, doc, el, limit = 24) {
  * @param {string} p.request 用户原话
  * @param {Array} p.history 之前几轮对话（role/text）
  */
-export function buildContext({ win, doc, el, pid, request, history = [], names = null, retry = null, maxHtmlBytes = 24 * 1024 }) {
+export function buildContext({ win, doc, el, pid, request, history = [], names = null, retry = null, assets = [], maxHtmlBytes = 24 * 1024 }) {
   const chain = [];
   let cur = el;
   while (cur && cur.nodeType === 1 && chain.length < 12) {
@@ -174,7 +174,20 @@ export function buildContext({ win, doc, el, pid, request, history = [], names =
       descendantCount: el.querySelectorAll('*').length,
     },
     request: String(request ?? ''),
-    // 上一次被拒绝时的反馈（父窗口在"越界"后自动补上，让模型知道该怎么改）
+    // 用户从对话框带进来的图片：**只给元数据**（id/名称/尺寸/大小），不给 base64 ——
+    // 模型只需要"用哪张、放哪里"，图片本体由父窗口在应用 patch 时补上。
+    assets: (Array.isArray(assets) ? assets : [])
+      .slice(0, 6)
+      .map((a) => ({
+        id: String(a?.id ?? ''),
+        name: String(a?.name ?? '').slice(0, 60),
+        mime: String(a?.mime ?? ''),
+        width: Number(a?.width) || null,
+        height: Number(a?.height) || null,
+        bytes: Number(a?.bytes) || null,
+      }))
+      .filter((a) => a.id),
+    // 上一次被拒绝时的反馈（父窗口在"越界/资源不存在"后自动补上，让模型知道该怎么改）
     retry: retry && typeof retry === 'object' ? retry : null,
     history: (history ?? []).slice(-6),
   };

@@ -118,13 +118,41 @@
   `value` 为 CSS 字面量字符串；值以 `!important` 结尾会被拆出来设置 `priority`。
 - `setText` 只改文本，不解析 HTML；`setHtml` 才解析 HTML（内部自动重注入 pid）。
 - **插入落点规则**（`insertHtml`）：`append`/`prepend` 插到 target 内部；
-  `before`/`after` 插成 target 的兄弟。允许的情形只有两种：
-  ① 插入点的父节点就是 scope 或 scope 的祖先（落点在选区内）；
-  ② target 就是选中元素本身、插入点父节点 = 它的父节点（"在这块旁边加东西"）。
-  其余（例如选中卡片里的 `<h3>` 却把节点插到卡片外层）一律拒绝。
+  `before`/`after` 插成 target 的兄弟。允许的情形只有三种：
+  ① 插入点的父节点就是 scope（直接插进选区）；
+  ② scope 包含插入点的父节点（插进**选区内部的嵌套容器** —— 例如"选中整块卡片，把图放在卡片里的标题下面"）；
+  ③ target 就是选中元素本身、插入点父节点 = 它的父节点（"在这块旁边加东西"）。
+  其余（把节点挂到选区之外，例如挂到选区的祖先上）一律拒绝。
   另外 `sanitizeHtmlFragment` 会把 `<script>/<style>/<iframe>/on*` 等剥离，清洗后为空则不产生任何改动。
 - 禁止 `op` 之外的自定义字段；未知 `op` → 整单拒绝（不猜、不忽略）。
 - 模型若返回 ```json 代码围栏或前后废话，`extractJson()` 负责剥离；剥不出来 → 报错重试，**绝不**把原文当 HTML 用。
+
+### 4.1 图片：`insertImage` + Asset v1（用户从对话框带图进来）
+
+用户贴图后，**图片本体永远不进上下文 JSON**（几 MB 的 base64 会撑爆 prompt，模型也必然抄错）。
+分工是：
+
+```jsonc
+// 上下文里只给元数据（ContextEnvelope.assets）
+"assets": [{ "id": "a1", "name": "拿铁拉花.png", "mime": "image/png", "width": 1200, "height": 800, "bytes": 240000 }]
+
+// 模型只回答"用哪张、放哪里"
+{ "op": "insertImage", "target": "p-xxxx", "position": "before|after|append|prepend",
+  "asset": "a1", "alt": "说明", "style": { "width": "100%", "max-width": "320px", "border-radius": "8px" } }
+```
+
+- `asset` 必填，必须是 `assets[].id`；写错或不带图片 → `E_PATCH_UNKNOWN_ASSET`（消息里列出可用 id，
+  父窗口会把它回喂给模型自动重试一次）；data URL 不是图片 → `E_PATCH_BAD_ASSET`。
+- `position` 默认 **`append`**（放进选中元素内部末尾）；`before`/`after` 的落点规则与 `insertHtml` 完全一致。
+- `style` 只允许**插入图片的收窄白名单**（见 `INSERT_IMAGE_STYLE_OK`）：
+  `position` / `inset` / `z-index` / `float` / `display` 一律丢弃 —— 它们会把图片拽出文档流盖住整页。
+- 执行时由父窗口把 id 换成真实 `src`（`applyPatch(..., { assets })`），
+  生成 `<img src="data:image/png;base64,..." alt="…">`，再走与 `insertHtml` 同一套插入 / 撤销逻辑。
+- 支持的图片格式：png / jpeg / gif / webp / bmp（`data:image/<这些>;base64,`）。
+  父窗口会把长边压到 ≤1600px、单张压到 ≤800KB（图片要内嵌进 HTML 并随版本快照进 localStorage）。
+- **视觉**：`provider.generate(context, { assets })` 会把 data URL 作为 OpenAI 兼容的
+  `image_url` 内容块发给模型（可在输入区关掉）。端点不支持多模态时会**自动退回纯文字重试一次** ——
+  位置决策只靠自然语言本来就能完成，所以"模型不支持看图"不会变成用户的死路。
 
 ## 5. patch 执行器与撤销
 

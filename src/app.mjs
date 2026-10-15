@@ -11,11 +11,88 @@ import { createProvider, PROVIDERS } from './provider.mjs';
 import { ChatPanel, VersionsPanel, SettingsModal } from './ui.mjs';
 import { Overlay } from './overlay.mjs';
 import { validatePatch, summarizePatch } from './schema.mjs';
-import { deepClone, escapeHtml, formatDateTime, safeJsonParse, truncate, uid } from './util.mjs';
+import { deepClone, escapeHtml, formatBytes, formatDateTime, safeJsonParse, truncate, uid } from './util.mjs';
 import { describePatch } from './diff.mjs';
 import { chipsFor, breadcrumbFromChain } from './naming.mjs';
 
 const NS = 'zhidaiqi';
+
+/* ============================== 图片附件（常量与工具） ============================== */
+
+/** 一次最多带几张图（和 context.assets 的截断保持一致，避免模型看到不存在的图） */
+const MAX_ASSETS = 6;
+/** 单张图的体积上限：图片会内嵌进 HTML 并随每次版本快照进 localStorage，必须压住 */
+const MAX_ASSET_BYTES = 800 * 1024;
+/** 长边上限（超过就等比缩小） */
+const MAX_ASSET_EDGE = 1600;
+
+/** 读文件为 data URL（浏览器用 FileReader；缺失时退回 arrayBuffer） */
+async function readAsDataUrl(file) {
+  if (typeof FileReader !== 'undefined') {
+    return await new Promise((resolve, reject) => {
+      const fr = new FileReader();
+      fr.onload = () => resolve(String(fr.result));
+      fr.onerror = () => reject(new Error('读文件失败'));
+      fr.readAsDataURL(file);
+    });
+  }
+  if (typeof file.arrayBuffer === 'function') {
+    const buf = new Uint8Array(await file.arrayBuffer());
+    let bin = '';
+    for (const b of buf) bin += String.fromCharCode(b);
+    return `data:${file.type || 'image/png'};base64,${btoa(bin)}`;
+  }
+  throw new Error('当前环境无法读取文件');
+}
+
+/** 量一下 data URL 的像素尺寸（没有 Image 就返回 null，不阻塞流程） */
+function measureImage(dataUrl) {
+  if (typeof Image === 'undefined') return Promise.resolve({ width: null, height: null });
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => resolve({ width: img.naturalWidth || img.width || null, height: img.naturalHeight || img.height || null });
+    img.onerror = () => resolve({ width: null, height: null });
+    img.src = dataUrl;
+  });
+}
+
+/**
+ * 超大图就等比缩小并重新编码。没有 canvas 的环境（Node 测试）直接原样返回。
+ * @returns {Promise<{dataUrl:string,width:number|null,height:number|null,bytes:number}>}
+ */
+async function downscaleIfNeeded(dataUrl, mime) {
+  const size = await measureImage(dataUrl);
+  const bytesOf = (u) => Math.round(u.length * 0.75);
+  const bigEdge = size.width && size.height && Math.max(size.width, size.height) > MAX_ASSET_EDGE;
+  const bigBytes = bytesOf(dataUrl) > MAX_ASSET_BYTES;
+  const canDraw = typeof document !== 'undefined' && typeof document.createElement === 'function';
+  if ((!bigEdge && !bigBytes) || !canDraw || !size.width) {
+    return { dataUrl, width: size.width, height: size.height, bytes: bytesOf(dataUrl) };
+  }
+  try {
+    const scale = bigEdge ? MAX_ASSET_EDGE / Math.max(size.width, size.height) : 1;
+    const w = Math.max(1, Math.round(size.width * scale));
+    const h = Math.max(1, Math.round(size.height * scale));
+    const canvas = document.createElement('canvas');
+    canvas.width = w;
+    canvas.height = h;
+    const ctx = canvas.getContext?.('2d');
+    if (!ctx) return { dataUrl, width: size.width, height: size.height, bytes: bytesOf(dataUrl) };
+    const img = new Image();
+    await new Promise((resolve, reject) => {
+      img.onload = resolve;
+      img.onerror = () => reject(new Error('图片解码失败'));
+      img.src = dataUrl;
+    });
+    ctx.drawImage(img, 0, 0, w, h);
+    // PNG 可能是截图/带透明，体积优先用 JPEG，除非本来就很小
+    const asJpeg = !/png/i.test(mime) || bytesOf(dataUrl) > MAX_ASSET_BYTES;
+    const out = canvas.toDataURL?.(asJpeg ? 'image/jpeg' : 'image/png', 0.85) ?? dataUrl;
+    return { dataUrl: out, width: w, height: h, bytes: bytesOf(out) };
+  } catch {
+    return { dataUrl, width: size.width, height: size.height, bytes: bytesOf(dataUrl) };
+  }
+}
 const BUBBLE_ACTIONS = [
   { id: 'ai', label: '✦ 让 AI 改这块', primary: true },
   { id: 'rename', label: '✎ 改名' },
@@ -48,6 +125,11 @@ export class EditorApp {
     this.aiming = true;
     // 用户自定义命名（R5）：pid → 名字，持久化在本地，并下发给 iframe 的命名引擎
     this.names = this.loadNames();
+
+    // 图片附件：只活在本次会话（图片本体已经内嵌进页面 HTML，不需要额外持久化）
+    this.assets = [];
+    this.assetSeq = 0;
+    this.visionSend = true; // 默认也把图发给模型（视觉模型能"看图"），可在输入区关掉
 
     this.buildShell();
     this.wireStore();
@@ -240,6 +322,11 @@ export class EditorApp {
     this.panelChat = new ChatPanel(main.querySelector('[data-el="panel-chat"]'), {
       onSend: (text) => this.send(text),
       onSettings: () => this.openSettings(),
+      onAttachFiles: (files) => this.ingestFiles(files),
+      onRemoveAsset: (id) => this.removeAsset(id),
+      onVisionToggle: (on) => {
+        this.visionSend = !!on;
+      },
       onClearSelection: () => this.clearSelection(),
       onRename: (target) => this.startRename(target),
       onCopySelector: (path) => this.copySelector(path),
@@ -869,18 +956,19 @@ export class EditorApp {
     this.panelChat.setBusy(true, `正在读取 ${this.selection.label} 的样式与结构…`);
 
     try {
-      let context = await this.rpc('getContext', { request, history: this.history.slice(-6) });
+      let context = await this.rpc('getContext', { request, history: this.history.slice(-6), assets: this.assetMeta() });
       this.panelChat.setBusy(true, `正在读取 ${this.selection.name ?? this.selection.label} 的样式与结构…`);
       let result = await this.provider.generate(context, {
         onDelta: (hint) => this.panelChat.setBusy(true, hint),
+        assets: this.visionSend ? this.assets : [],
       });
       this.panelChat.setBusy(false);
       // 第 1 步的验收要求：先能在控制台看到结构化输出
       console.log('[zhidaiqi] 模型返回原文：\n', result.raw);
       console.log('[zhidaiqi] 解析后的 Patch v1：', result.patch);
 
-      // 越界自愈：模型偶尔会引用选中范围外的元素（尤其"给这块加个底"这类需求）。
-      // 不把它变成用户的死路 —— 把"可用的 pid"回喂给模型，让它改用自己的方式实现一次。
+      // 自愈：模型偶尔会引用选中范围外的元素，或引用不存在的图片资源。
+      // 不把它变成用户的死路 —— 把"可用的 pid / 可用的图片 id"回喂给模型，让它自己纠正一次。
       let retried = false;
       for (;;) {
         try {
@@ -888,29 +976,42 @@ export class EditorApp {
           break;
         } catch (err) {
           const scopeError = err?.code === 'E_PATCH_OUT_OF_SCOPE' || err?.code === 'E_PATCH_TARGET_MISSING';
-          if (!scopeError || retried) {
+          const assetError = err?.code === 'E_PATCH_UNKNOWN_ASSET' || err?.code === 'E_PATCH_BAD_ASSET';
+          if ((!scopeError && !assetError) || retried) {
             this.lastScopeError = scopeError ? { error: err.message, request } : null;
             throw err;
           }
           retried = true;
           const allowedPids = context.target?.modifiablePids ?? [context.target?.pid].filter(Boolean);
+          const allowedAssets = this.assets.map((a) => a.id);
           this.panelChat.addMessage(
             'sys',
-            `AI 想改的那块不在你选中的范围内（${err.message.slice(0, 60)}…）。\n` +
-              `我已把"只能改这 ${allowedPids.length} 个元素"告诉它，让它改用选中元素自身能实现的方式重新生成…`,
+            assetError
+              ? `AI 引用的图片不存在（${err.message.slice(0, 60)}…）。我已把可用的图片 id 告诉它，让它重新生成…`
+              : `AI 想改的那块不在你选中的范围内（${err.message.slice(0, 60)}…）。\n` +
+                  `我已把"只能改这 ${allowedPids.length} 个元素"告诉它，让它改用选中元素自身能实现的方式重新生成…`,
           );
-          this.panelChat.setBusy(true, '正在按范围约束重新生成…');
+          this.panelChat.setBusy(true, '正在按约束重新生成…');
           context = await this.rpc('getContext', {
             request,
             history: this.history.slice(-6),
-            retry: { error: err.message, allowedPids },
+            assets: this.assetMeta(),
+            retry: { error: err.message, allowedPids, allowedAssets },
           });
-          result = await this.provider.generate(context, { onDelta: (hint) => this.panelChat.setBusy(true, hint) });
+          result = await this.provider.generate(context, {
+            onDelta: (hint) => this.panelChat.setBusy(true, hint),
+            assets: this.visionSend ? this.assets : [],
+          });
           this.panelChat.setBusy(false);
-          console.log('[zhidaiqi] 越界后重试返回：', result.patch);
+          console.log('[zhidaiqi] 被拒后重试返回：', result.patch);
         }
       }
       this.lastScopeError = null;
+      // 图片已经内嵌进页面了，待发送区清空（取消预览时页面会还原，用户可以重新贴）
+      if (this.assets.length) {
+        this.clearAssets();
+        this.panelChat.addMessage('sys', '图片已插入页面并内嵌为 base64（单文件可直接分享），待发送区已清空。');
+      }
     } catch (err) {
       this.panelChat.setBusy(false);
       const detail = err?.detail?.raw ? `\n模型原文片段：\n${String(err.detail.raw).slice(0, 600)}` : '';
@@ -968,7 +1069,7 @@ export class EditorApp {
 
     const patch = validatePatch(result.patch);
     const before = await this.rpc('extractCleanHtml');
-    const applied = await this.rpc('applyPatch', { patch });
+    const applied = await this.rpc('applyPatch', { patch, assets: this.assetMap() });
     this.preview = {
       patch,
       beforeHtml: before.html,
@@ -1047,6 +1148,91 @@ export class EditorApp {
     if (this.preview) await this.cancelPreview({ silent: true });
     this.history.push({ role: 'assistant', text: '（重试）' });
     await this.send(lastUser.text);
+  }
+
+  /* ================================ 图片附件 ================================ */
+
+  /**
+   * 把用户贴进来的图片转成"可内嵌进 HTML 的 data URL"。
+   *
+   * 为什么要处理尺寸与体积：图片会被内嵌进 HTML，而每次"接受"都会存一份快照到 localStorage，
+   * 一张 4 MB 的原图叠几个版本就会把 5 MB 的配额撑爆。所以这里统一压到
+   * 长边 ≤ 1600px、单张 ≤ 800 KB（照片转 JPEG，小图保持原格式）。
+   * 所有浏览器 API 都做了存在性判断：Node 测试环境（shim）里没有 Image/FileReader/canvas，
+   * 那一层直接跳过处理、接受现成的 data URL，功能逻辑仍然可测。
+   */
+  async ingestFiles(files) {
+    const list = [...(files ?? [])].filter((f) => f && (/^image\//i.test(f.type ?? '') || /\.(png|jpe?g|gif|webp|bmp)$/i.test(f.name ?? '')));
+    if (!list.length) return;
+    if (list.some((f) => f.type && !/^image\/(png|jpe?g|gif|webp|bmp)$/i.test(f.type))) {
+      this.toast('只支持 png / jpg / gif / webp / bmp 图片', 'warn');
+      return;
+    }
+    for (const file of list) {
+      if (this.assets.length >= MAX_ASSETS) {
+        this.toast(`一次最多带 ${MAX_ASSETS} 张图`, 'warn');
+        break;
+      }
+      try {
+        const dataUrl = await readAsDataUrl(file);
+        const processed = await downscaleIfNeeded(dataUrl, file.type ?? '');
+        if (processed.bytes > MAX_ASSET_BYTES) {
+          this.toast(`「${file.name ?? '图片'}」处理后仍然太大（${formatBytes(processed.bytes)}），换张小一点的`, 'err');
+          continue;
+        }
+        this.addAsset({
+          name: file.name || `图片${this.assets.length + 1}`,
+          mime: (processed.dataUrl.match(/^data:([^;]+)/) ?? [, 'image/png'])[1],
+          dataUrl: processed.dataUrl,
+          width: processed.width,
+          height: processed.height,
+          bytes: processed.bytes,
+        });
+      } catch (err) {
+        this.toast(`读取图片失败：${err.message}`, 'err');
+      }
+    }
+  }
+
+  /** 登记一张图片（测试与粘贴/拖拽/选择文件都走这里） */
+  addAsset(asset) {
+    if (!asset?.dataUrl) return null;
+    const id = `a${++this.assetSeq}`;
+    const item = {
+      id,
+      name: String(asset.name ?? '图片').slice(0, 60),
+      mime: String(asset.mime ?? 'image/png'),
+      dataUrl: String(asset.dataUrl),
+      width: Number(asset.width) || null,
+      height: Number(asset.height) || null,
+      bytes: Number(asset.bytes) || Math.round(String(asset.dataUrl).length * 0.75),
+    };
+    this.assets.push(item);
+    this.panelChat.renderAttachments(this.assets);
+    console.log('[zhidaiqi] 已加入图片：', item.id, item.name, formatBytes(item.bytes));
+    return item;
+  }
+
+  removeAsset(id) {
+    this.assets = this.assets.filter((a) => a.id !== id);
+    this.panelChat.renderAttachments(this.assets);
+  }
+
+  clearAssets() {
+    this.assets = [];
+    this.panelChat.renderAttachments([]);
+  }
+
+  /** 给桥用的资源表：id → data URL（应用 patch 时把 insertImage 补成真的 img） */
+  assetMap() {
+    const map = {};
+    for (const a of this.assets) map[a.id] = { dataUrl: a.dataUrl, name: a.name, width: a.width, height: a.height };
+    return map;
+  }
+
+  /** 给模型的资源清单：只有元数据，没有 base64 */
+  assetMeta() {
+    return this.assets.map((a) => ({ id: a.id, name: a.name, mime: a.mime, width: a.width, height: a.height, bytes: a.bytes }));
   }
 
   /* ================================ 版本与还原 ================================ */

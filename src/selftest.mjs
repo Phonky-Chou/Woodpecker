@@ -485,6 +485,36 @@ export async function runSelfTest(app, { log = () => {} } = {}) {
       );
     }),
 
+    want('贴一张图并说"放在标题下面"，图片真的插到那里', async () => {
+      const doc = t().doc;
+      await t().selectCss(SELECTOR);
+      const el = doc.querySelector(SELECTOR);
+      const pid = app.selection.pid;
+      // 1×1 的合法 PNG
+      const tiny =
+        'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=';
+      const before = doc.querySelectorAll('img').length;
+      const asset = app.addAsset({ dataUrl: tiny, name: '自检图.png', width: 1, height: 1, bytes: 120 });
+      const thumbOk = app.panelChat.thumbs.querySelectorAll('.z-thumb').length === 1;
+      let ok = false;
+      let detail = '';
+      try {
+        await t().send('把这张图放在标题下面');
+        await sleep(150);
+        const inserted = doc.querySelectorAll('img').length > before;
+        const chosen = pid ? doc.querySelector(`[data-pid="${pid}"]`) : el;
+        const nextIsImg = chosen?.nextElementSibling?.tagName === 'IMG';
+        const srcOk = nextIsImg && chosen.nextElementSibling.getAttribute('src') === tiny;
+        ok = inserted && nextIsImg && srcOk && !!app.preview;
+        detail = `缩略图=${thumbOk} 页面新增图=${inserted} 紧跟标题=${nextIsImg} src 正确=${srcOk} 进入预览=${!!app.preview}`;
+      } catch (err) {
+        detail = `发送失败：${err.message}`;
+      }
+      if (app.preview) await app.cancelPreview();
+      app.clearAssets();
+      check('贴一张图并说"放在标题下面"，图片真的插到那里', ok, detail);
+    }),
+
     want('版本历史与预览卡渲染正常', async () => {
       app.switchTab('versions');
       const rows = document.querySelectorAll('.z-ver').length;

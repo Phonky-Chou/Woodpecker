@@ -244,6 +244,78 @@
 
 ---
 
+## 第六轮（develop1）：R7 对话框贴图 + AI 判断图片插到哪
+
+**需求**：对话框像 DeepSeek 一样能加图片；AI 能根据自然语言明白"这张图要加在什么位置"。
+
+### 关键设计：让模型只回答"用哪张、放哪里"，绝不碰图片本体
+
+把 base64 塞进上下文是最糟的做法（几 MB 会撑爆 prompt，模型也必然抄错）。所以：
+
+| 角色 | 拿到什么 | 输出/做什么 |
+| --- | --- | --- |
+| 模型 | `context.assets`：**只有元数据**（id / 文件名 / 像素尺寸 / 体积）+ 用户那句自然语言 | `{"op":"insertImage","target":"<pid>","position":"before\|after\|append\|prepend","asset":"a1","alt":"…","style":{…}}` |
+| 父窗口 | 用户贴进来的真实 data URL（`applyPatch(..., { assets })`） | 应用 patch 时把 `asset` 换成真实 `src`，再走 `insertHtml` 那套插入/撤销逻辑 |
+
+于是模型只需要做**位置决策**这一件事，而位置词与现有 `insertHtml` 完全一致，范围约束照旧生效。
+
+### 位置语义与提示词
+
+四种 `position` 在提示词里被翻译成**中文方位词**，并给了成体系的例子：
+"标题下面/下方/后面" → `after`；"卡片里面/底部" → `append`；"这段文字前面/上面" → `before`；
+"最顶上/这块区域开头" → `prepend`；**没说位置 → `append`**（放进选中元素内部末尾，并在 summary 里说明）。
+
+配套约束：
+- `insertImage` 的 `style` 走**收窄白名单**：明确排除 `position`/`inset`/`z-index`/`float`/`display` ——
+  它们会把图片拽出文档流盖住整页（`setStyle` 的白名单允许它们，但那是针对已有元素的微调）。
+- 图片 id 写错 → `E_PATCH_UNKNOWN_ASSET`，并把可用 id 回喂给模型自动重试一次（复用越界自愈那套）。
+
+### 顺带修掉一个插入规则的盲区（原有 bug）
+
+原来的 `before`/`after` 范围判断是 `insertParent === scope || insertParent.contains(scope)` ——
+**方向反了**：它允许"插到选区的祖先层"，却拒绝了最自然的
+"选中整块卡片，把图放在卡片里的标题下面"（插入点的父节点正是 scope 的后代）。
+现在改成 `insertParent === scope || scope.contains(insertParent)`，并保留"target 就是选中元素 → 插在旁边"。
+契约文档 §4 已同步。
+
+### 客户端侧（对话框）
+
+- **加图**：🖼 按钮选文件 / `Ctrl+V` 粘贴截图 / 拖拽进输入框；缩略图显示文件名 + 像素尺寸 + 体积，`✕` 移除；最多 6 张。
+- **压缩**：长边 >1600px 或单张 >800KB 就在 canvas 里等比缩小并重编码
+  （图片会内嵌进 HTML，而每次"接受"都要存一份快照进 localStorage，不压住会把配额撑爆）。
+  所有浏览器 API 都做了存在性判断，Node 测试环境直接跳过处理 —— 功能逻辑照样可测。
+- **看图**：默认把 data URL 作为 OpenAI 兼容的 `image_url` 内容块一起发给模型（可在输入区关掉）；
+  端点不支持多模态时**自动退回纯文字重试一次**。
+
+### 真机验收（SiliconFlow + `deepseek-ai/DeepSeek-V4-Flash`）
+
+| 用户说法（选中范围） | 模型给出的位置 | 落地结果 |
+| --- | --- | --- |
+| "把这张图放在标题下面"（选中首屏） | `after` on 标题 | ✅ 插到 SECTION 里、H1 之后 |
+| "这张图放在最上面"（选中首屏） | `prepend` on 首屏 | ✅ 成为 SECTION 的第一个子节点 |
+| "把图放进这张卡片里面"（选中卡片区） | `append` on 第一张卡片 | ✅ 插进卡片内部末尾 |
+
+另外实测：该端点**不接受图片输入**（`image_url` 内容块被拒）→ 自动退回纯文字，**位置判断依然全部正确**。
+想让它真的"看图"需要换视觉模型，这一点写进了 README。
+
+### 测试基础设施又被真实场景带出两个问题
+
+1. **`children` 里混进了文本节点**（浏览器只放元素）：`nextElementSibling` 会返回 `#text`、
+   `firstElementChild` 会拿到文本。更糟的是 `removeChild` 假设 `children`/`childNodes` 下标一致 ——
+   同一个下标插两套数组，插入点会错位，最严重时让一个插入操作跑了 **95 秒**才抛
+   `RangeError: Array buffer allocation failed`。现在两套数组各自按自己的下标维护。
+2. **断言里比较 DOM 节点会炸**：`assert.equal(节点, null)` 失败时 Node 去 inspect 整个环形 DOM 图，
+   单条断言 90 秒后抛同样的 RangeError。两手都修：给 shim 的节点加自定义 `inspect`
+   （打印成短字符串），并把测试里的节点比较改成 `assert.ok(!...)` 或比较 `tagName` 这类基本值。
+3. **shim 正文从模板里抽出来了**：它原本嵌在 `String.raw` 模板中，正文出现反引号就会把模板截断
+   （连续踩了三次，最阴险的一次反引号成偶数：外层模块照样解析、生成的 .cjs 却是坏的）。
+   现在正文是普通文件 `tools/dom-shim-impl.cjs`，加载前仍过一遍 `vm.Script` 语法校验。
+
+> 教训：**测试基础设施的失真会同时制造假红和假绿**。这一轮里，分词器 bug 让页面脚本静默失效（假绿），
+> 数组错位让插入操作跑 95 秒（假红）—— 两者都跟被测功能无关，却都能让人得出错误结论。
+
+---
+
 ## 第五轮（develop1）：R6 交互隔离 —— 指代器开启时页面必须"冻住"
 
 **需求**：导入的 HTML 在指代器**关闭**时功能要正常；指代器**开启**后鼠标只属于指代器，
@@ -389,12 +461,12 @@
 ```powershell
 node tools/test-naming.mjs       # 16 项  命名引擎（R1/R3.3）
 node tools/test-unit.mjs         # 32 项  patch 契约与护栏
-node tools/test-dom-smoke.mjs    # 27 项  真实 DOM 执行链路
-node tools/test-app-wiring.mjs   # 21 项  应用级接线（含 R1/R1.4/R3.3/R4.3/R5 + 工具条行为）
+node tools/test-dom-smoke.mjs    # 31 项  真实 DOM 执行链路
+node tools/test-app-wiring.mjs   # 26 项  应用级接线（含 R1/R1.4/R3.3/R4.3/R5 + 工具条行为）
 node tools/test-bundle.mjs       # 12 项  产物结构 + 布局 + 接线契约
 ```
 
-合计 **108 项全部通过**；页面内自检 **27 项**（顶栏「更多 ▾ → 🧪 页面内自检」）。
+合计 **117 项全部通过**；页面内自检 **28 项**（顶栏「更多 ▾ → 🧪 页面内自检」）。
 
 优化过程中被测试抓出的真问题（都已修）：
 1. `setAiming` 下发 `setMode` → 桥回发 `mode` 事件 → 又触发 `setAiming` → **无限 RPC 循环**（页面卡死）；
