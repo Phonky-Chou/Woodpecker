@@ -730,6 +730,54 @@ test('带图的自然语言：离线引擎也能把"下面/上面/里面"翻译�
   assert.ok(!JSON.stringify(ctx).includes('base64'), '上下文绝不能把 base64 递给模型');
 });
 
+test('setBackgroundImage：把图设为背景（不占布局），撤销精确复原', () => {
+  const { document, anchor } = fresh();
+  const section = document.querySelector('.hero');
+  const pid = anchor.pidOf(section);
+  const beforeStyle = section.getAttribute('style');
+  assert.equal(section.querySelectorAll('img').length, 0, '前提：这块里本来没有 img');
+
+  const r = applyPatch(document, section, { version: 1, target: pid, changes: [{ op: 'setBackgroundImage', target: pid, asset: 'a1' }] }, { assets: ASSETS });
+  assert.equal(r.applied.length, 1);
+  assert.ok(section.style.getPropertyValue('background-image').includes(TINY_PNG), '背景图必须是内嵌的 data URL');
+  assert.equal(section.style.getPropertyValue('background-size'), 'cover', '默认 cover');
+  assert.equal(section.style.getPropertyValue('background-position'), 'center', '默认 center');
+  assert.equal(section.style.getPropertyValue('background-repeat'), 'no-repeat', '默认不重复');
+  assert.equal(section.querySelectorAll('img').length, 0, '背景不是插入元素：不许往里面加 img（那会把内容挤走）');
+
+  undoPatch(document, r.inverse);
+  assert.equal(section.getAttribute('style'), beforeStyle, '撤销后 style 必须逐字节复原');
+
+  // 指定 size/position/repeat
+  const r2 = applyPatch(
+    document,
+    section,
+    { version: 1, target: pid, changes: [{ op: 'setBackgroundImage', target: pid, asset: 'a1', size: 'contain', position: 'top right', repeat: 'repeat-x' }] },
+    { assets: ASSETS },
+  );
+  assert.equal(section.style.getPropertyValue('background-size'), 'contain');
+  assert.equal(section.style.getPropertyValue('background-position'), 'top right');
+  assert.equal(section.style.getPropertyValue('background-repeat'), 'repeat-x');
+  undoPatch(document, r2.inverse);
+  assert.equal(section.getAttribute('style'), beforeStyle);
+
+  // 非法取值与不存在的资源都要拦住
+  assert.throws(
+    () => applyPatch(document, section, { version: 1, target: pid, changes: [{ op: 'setBackgroundImage', target: pid, asset: 'a1', size: '9999px' }] }, { assets: ASSETS }),
+    (err) => err.code === 'E_PATCH_SHAPE',
+    'size 只允许白名单里的值',
+  );
+  assert.throws(
+    () => applyPatch(document, section, { version: 1, target: pid, changes: [{ op: 'setBackgroundImage', target: pid, asset: 'zz' }] }, { assets: ASSETS }),
+    (err) => err.code === 'E_PATCH_UNKNOWN_ASSET',
+  );
+  assert.throws(
+    () => applyPatch(document, section, { version: 1, target: pid, changes: [{ op: 'setBackgroundImage', target: pid, asset: 'x' }] }, { assets: { x: { dataUrl: 'data:text/html;base64,PHNjcmlwdD4=' } } }),
+    (err) => err.code === 'E_PATCH_BAD_ASSET',
+  );
+  assert.equal(section.getAttribute('style'), beforeStyle, '被拒时不允许留下任何改动');
+});
+
 test('干净导出必须剥掉编辑器注入的 bootstrap 脚本', () => {
   // 模拟浏览器里的真实形态：文档末尾有 app 注入的 bootstrap <script data-z-inject>
   const withInject =

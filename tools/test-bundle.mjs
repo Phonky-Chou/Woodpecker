@@ -267,6 +267,17 @@ test('产物样式：应用根容器必须撑满视口（防"下面留白"回归
   assert.match(css, /\.z-main\s*\{[^}]*min-height:\s*0/, '.z-main 需要 min-height:0');
 });
 
+test('本地代理的请求体上限必须放得下图片（防 "Failed to fetch" 回归）', () => {
+  const src = fs.readFileSync(path.join(ROOT, 'tools', 'serve.mjs'), 'utf8');
+  const m = src.match(/const MAX_BODY = (\d+)\s*\*\s*(\d+)\s*\*\s*(\d+)/);
+  assert.ok(m, 'serve.mjs 里应有 MAX_BODY 常量（别把上限写死成一个小数字）');
+  const bytes = Number(m[1]) * Number(m[2]) * Number(m[3]);
+  // 真踩过：上限 512KB 时，用户一张 668KB 的图（base64 后 ~891KB）会让请求被掐断，
+  // 浏览器只报一句 "Failed to fetch"，完全看不出原因。图片是 base64 内嵌进请求体的，必须留足余量。
+  assert.ok(bytes >= 8 * 1024 * 1024, `MAX_BODY 太小：${Math.round(bytes / 1024)}KB（至少 8MB，图片是 base64 内嵌的）`);
+  assert.match(src, /tooLarge/, '超限时要回 413 且带上可操作的提示，而不是把连接掐断');
+});
+
 test('单文件 HTML 的脚本块结构正确，脚本之外没有 JS 泄露', () => {
   const html = fs.readFileSync(path.join(OUT, 'zhidaiqi.html'), 'utf8');
 

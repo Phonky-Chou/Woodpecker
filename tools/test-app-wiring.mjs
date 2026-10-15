@@ -860,6 +860,59 @@ test('贴图自愈：模型写了不存在的图片 id，会被回喂可用 id �
   assert.equal(doc.querySelector('h1').nextElementSibling?.tagName, 'IMG', '图片应插进页面');
 });
 
+test('贴图 + "把这张图当这一页的背景" → 设成 background-image，不插入元素', async () => {
+  const app = await bootApp();
+  const doc = app.frame.contentDocument;
+  const h1 = doc.querySelector('h1');
+  const section = h1.parentElement;
+  await app.rpc('select', { pid: section.getAttribute('data-pid') });
+  app.addAsset({ dataUrl: TINY_PNG, name: '双城之战.png', width: 1054, height: 590, bytes: 668 * 1024 });
+
+  await app.send('把这张图当这一页的背景');
+  await sleep(60);
+  assert.ok(app.preview, '应进入预览态');
+  const bg = section.style.getPropertyValue('background-image');
+  assert.ok(bg.includes('data:image/png;base64'), `背景图应被设成内嵌 data URL，实际=${bg.slice(0, 40)}`);
+  assert.equal(section.style.getPropertyValue('background-size'), 'cover', '铺满默认 cover');
+  assert.equal(doc.querySelectorAll('img').length, 0, '背景不该插入 <img> 元素（那会把内容挤走）');
+  await app.cancelPreview();
+});
+
+test('模型不支持图片输入时：记住它，之后不再重复上传那 ~1MB', async () => {
+  const app = await bootApp();
+  const doc = app.frame.contentDocument;
+  const pid = doc.querySelector('h1').getAttribute('data-pid');
+  await app.rpc('select', { pid });
+  app.addAsset({ dataUrl: TINY_PNG, name: 'a.png', width: 1, height: 1, bytes: 120 });
+
+  const seen = [];
+  let first = true;
+  app.provider = {
+    kind: 'fake',
+    label: '假模型',
+    async generate(context, options) {
+      seen.push((options?.assets ?? []).length);
+      if (first) {
+        first = false;
+        // 第一次：声称带了图但模型不吃，退回纯文字（provider 的真实行为）
+        return { raw: '{}', patch: { version: 1, target: pid, summary: '只发文字', changes: [{ op: 'setStyle', target: pid, prop: 'color', value: 'rgb(1,2,3)' }] }, visionFallback: true };
+      }
+      return { raw: '{}', patch: { version: 1, target: pid, summary: '第二次', changes: [{ op: 'setStyle', target: pid, prop: 'color', value: 'rgb(4,5,6)' }] } };
+    },
+  };
+  await app.send('把图当背景');
+  await sleep(50);
+  assert.equal(app.visionBlocked, true, '端点拒绝图片后应记住');
+  if (app.preview) await app.cancelPreview();
+  app.panelChat.renderAttachments([]);
+  app.addAsset({ dataUrl: TINY_PNG, name: 'b.png', width: 1, height: 1, bytes: 100 });
+  await app.send('再放一张图');
+  await sleep(50);
+  assert.equal(seen[0], 1, '第一次会把图发给模型');
+  assert.equal(seen[1], 0, '记住之后不再重复上传图片（省掉每次 ~1MB）');
+  assert.equal(app.assets.length, 0, '图片仍然会给到编辑器（用于插入），只是不发模型');
+});
+
 test.after?.(() => {});
 
 process.on('exit', () => cleanupDomShim());

@@ -44,6 +44,19 @@ export const SYSTEM_PROMPT = `你是"指代器"HTML 编辑器里的局部改样�
   {"op":"insertImage","target":"<pid>","position":"after","asset":"a1","alt":"说明","style":{"width":"100%","max-width":"320px","border-radius":"8px","margin":"12px 0"}}
 - 如果用户带了图但语境里根本看不出插哪，就选最合理的位置（通常是被选中区域的内部末尾），并在 summary 里写清楚你的判断依据。
 
+# 把图片当"背景"（和"插入图片"是两件事，别混）
+用户说"**当背景 / 做底图 / 铺在这块下面 / 当这一页的背景 / 垫在文字底下**"时，
+**不要用 insertImage**（那是插入一个 <img> 元素，会把内容挤走），要用 **setBackgroundImage**：
+- target：用户说的那一块。说"这一页/这块区域"时用**选中元素**；说了具体子块（"标题那一块的背景"）就用那个子块的 pid。
+- 背景会铺在内容**之下**，不占布局、不挤走文字 —— 这正是"当背景"的语义。
+- 例：{"op":"setBackgroundImage","target":"<pid>","asset":"a1","size":"cover","position":"center","repeat":"no-repeat"}
+- size/position/repeat 都给了有限取值：
+  size ∈ cover / contain / auto / 100% 100% / 100% auto / auto 100%；
+  position ∈ center / top / bottom / left / right / top left / top right / bottom left / bottom right / center center；
+  repeat ∈ no-repeat / repeat / repeat-x / repeat-y。不写就是 cover + center + no-repeat。
+- 背景图通常还要保证文字可读：如果原文字是深色而图偏暗，可以**同时**加一条
+  setStyle 把 color 调成浅色（或给一个半透明遮罩背景色），并在 summary 里说明。
+
 # 可用改动操作（op）
 - {"op":"setText","target":"<pid>","value":"新文本"}
 - {"op":"setAttr","target":"<pid>","name":"属性名","value":"属性值"}   // value 写 null = 删除该属性
@@ -51,6 +64,7 @@ export const SYSTEM_PROMPT = `你是"指代器"HTML 编辑器里的局部改样�
 - {"op":"setHtml","target":"<pid>","html":"<只含内部片段的 HTML>"}
 - {"op":"insertHtml","target":"<pid>","position":"before|after|append|prepend","html":"<片段>"}
 - {"op":"insertImage","target":"<pid>","position":"before|after|append|prepend","asset":"<assets[].id>","alt":"说明","style":{...}}
+- {"op":"setBackgroundImage","target":"<pid>","asset":"<assets[].id>","size":"cover","position":"center","repeat":"no-repeat"}
 - {"op":"removeNode","target":"<pid>"}
 
 # 输出格式（严格照抄这个形状）
@@ -92,7 +106,8 @@ export function buildUserInstruction(context) {
     lines.push(
       '',
       `用户带了 ${context.assets.length} 张图片：${context.assets.map((a) => `${a.id}（${a.name}）`).join('、')}。`,
-      '要用它们就写 insertImage op，asset 填上面的 id；不要自己写 img src 或 base64。',
+      '要用它们就写 insertImage（把图插成元素）或 setBackgroundImage（把图当某一块的背景）；',
+      'asset 填上面的 id，不要自己写 img src 或 base64。',
     );
   }
   lines.push('', '请输出 Patch v1 JSON。');

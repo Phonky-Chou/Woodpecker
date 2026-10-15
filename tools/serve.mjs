@@ -58,12 +58,23 @@ function json(res, code, payload) {
   res.end(body);
 }
 
-async function readBody(req, limit = 512 * 1024) {
+/**
+ * 读取请求体。
+ * 上限给到 12MB：用户贴的图片是 base64 内嵌进请求体的（一张 668KB 的图 ≈ 891KB base64），
+ * 之前的 512KB 上限会把请求掐断，浏览器只报 "Failed to fetch"，完全看不出原因。
+ */
+const MAX_BODY = 12 * 1024 * 1024;
+
+async function readBody(req, limit = MAX_BODY) {
   const chunks = [];
   let size = 0;
   for await (const chunk of req) {
     size += chunk.length;
-    if (size > limit) throw new Error('请求体过大');
+    if (size > limit) {
+      const err = new Error(`请求体过大（>${Math.round(limit / 1024 / 1024)}MB）`);
+      err.tooLarge = true;
+      throw err;
+    }
     chunks.push(chunk);
   }
   return Buffer.concat(chunks).toString('utf8');
@@ -75,6 +86,12 @@ async function handleChat(req, res) {
   try {
     payload = JSON.parse((await readBody(req)) || '{}');
   } catch (err) {
+    // 体积超限单独给 413 + 可操作提示（否则前端只会看到一句 "Failed to fetch"）
+    if (err.tooLarge) {
+      return json(res, 413, {
+        error: `${err.message}。带图片时请求体是 base64 内嵌的，请换小一点的图，或把"让模型看图"关掉（插入位置不需要看图也能判断）。`,
+      });
+    }
     return json(res, 400, { error: `请求体不是 JSON：${err.message}` });
   }
   const context = payload.context;

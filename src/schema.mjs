@@ -11,8 +11,12 @@ export const PATCH_VERSION = 1;
 export const MAX_CHANGES = 50;
 export const MAX_HTML_BYTES = 60 * 1024;
 
-export const OPS = ['setStyle', 'setText', 'setAttr', 'setHtml', 'insertHtml', 'insertImage', 'removeNode'];
+export const OPS = ['setStyle', 'setText', 'setAttr', 'setHtml', 'insertHtml', 'insertImage', 'setBackgroundImage', 'removeNode'];
 export const INSERT_POSITIONS = ['before', 'after', 'append', 'prepend'];
+/** 背景图的尺寸/位置/重复：只给有限几个安全值，避免模型塞进任意 CSS */
+export const BG_SIZES = ['cover', 'contain', 'auto', '100% 100%', '100% auto', 'auto 100%'];
+export const BG_POSITIONS = ['center', 'top', 'bottom', 'left', 'right', 'top left', 'top right', 'bottom left', 'bottom right', 'center center'];
+export const BG_REPEATS = ['no-repeat', 'repeat', 'repeat-x', 'repeat-y'];
 
 /** can-edit 的 CSS 属性白名单：覆盖布局/排版/颜色/装饰/变换，杜绝 position:fixed 之类的越界破坏 */
 export const STYLE_WHITELIST = new Set([
@@ -198,6 +202,23 @@ export function validatePatchShape(raw) {
         }
         break;
       }
+      case 'setBackgroundImage': {
+        // "把这张图当这一页的背景"：背景不是插入元素，而是给元素设 background-image。
+        // 模型同样只给 asset id，真实 data URL 由父窗口补。
+        const asset = String(change.asset ?? change.assetId ?? change.image ?? '').trim();
+        if (!asset) fail(`${at}.asset 必填（用 context.assets[].id 指定哪张图当背景）`, 'E_PATCH_SHAPE');
+        out.asset = asset;
+        const size = String(change.size ?? change['background-size'] ?? 'cover').toLowerCase().trim();
+        if (!BG_SIZES.includes(size)) fail(`${at}.size 只能是 ${BG_SIZES.join(' / ')}`, 'E_PATCH_SHAPE');
+        out.size = size;
+        const position = String(change.position ?? change['background-position'] ?? 'center').toLowerCase().trim();
+        if (!BG_POSITIONS.includes(position)) fail(`${at}.position 只能是 ${BG_POSITIONS.join(' / ')}`, 'E_PATCH_SHAPE');
+        out.position = position;
+        const repeat = String(change.repeat ?? change['background-repeat'] ?? 'no-repeat').toLowerCase().trim();
+        if (!BG_REPEATS.includes(repeat)) fail(`${at}.repeat 只能是 ${BG_REPEATS.join(' / ')}`, 'E_PATCH_SHAPE');
+        out.repeat = repeat;
+        break;
+      }
       case 'removeNode':
         break;
       default:
@@ -254,6 +275,8 @@ export function summarizePatch(patch) {
         const where = { before: '前面', after: '后面', append: '内部末尾', prepend: '内部开头' }[c.position] ?? c.position;
         return `图片插到${where}`;
       }
+      case 'setBackgroundImage':
+        return '换成背景图';
       case 'removeNode':
         return '删除元素';
       default:

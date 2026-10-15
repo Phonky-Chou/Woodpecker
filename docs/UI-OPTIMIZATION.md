@@ -314,6 +314,47 @@
 > 教训：**测试基础设施的失真会同时制造假红和假绿**。这一轮里，分词器 bug 让页面脚本静默失效（假绿），
 > 数组错位让插入操作跑 95 秒（假红）—— 两者都跟被测功能无关，却都能让人得出错误结论。
 
+### 补充（用户实测反馈）：两个问题
+
+用户贴了 668KB 的图、说"**把这张图当这一页的背景**"，结果是 `Failed to fetch`。查出两件事：
+
+**① "当背景"不是"插入图片" —— 功能缺口。**
+`insertImage` 插入的是 `<img>` 元素（参与布局、会把内容挤走），而"当背景"要设 `background-image`
+（铺在内容之下、不占布局）。新增一等公民的 `setBackgroundImage`：
+
+```jsonc
+{ "op":"setBackgroundImage","target":"<pid>","asset":"a1","size":"cover","position":"center","repeat":"no-repeat" }
+```
+
+- `size`/`position`/`repeat` 走有限白名单（`BG_SIZES`/`BG_POSITIONS`/`BG_REPEATS`），默认 cover/center/no-repeat；
+- 执行 = 设 `background-image: url("<dataUrl>")` + 三个属性；撤销走 `setStyle` 快照，**逐字节复原**；
+- 提示词里明确区分这两件事，并鼓励"图偏暗时同时加半透明遮罩 + 文字提亮"。
+
+真机验收（SiliconFlow + `deepseek-ai/DeepSeek-V4-Flash`）：
+
+| 用户说法 | 模型输出 | 落地 |
+| --- | --- | --- |
+| "把这张图当这一页的背景" | `setBackgroundImage(cover/center)` + 半透明遮罩 + 白色文字 | ✅ 背景铺上、内容仍可读 |
+| "把这张图当背景，铺满整块，文字要保持可读" | 同上（遮罩 0.5） | ✅ |
+| "给这块区域铺一张底图" | `setBackgroundImage` + 遮罩 | ✅ |
+
+**② `Failed to fetch` 的真因：本地代理请求体上限 512KB。**
+图片以 base64 内嵌在请求体里（668KB 的图 ≈ 891KB），超过上限 → 服务端掐断连接 →
+浏览器只报一句 `Failed to fetch`，完全看不出原因。修法：
+
+- `serve.mjs` 的 `MAX_BODY` 提到 **12MB**，超限回 **413 + 可操作提示**（不再掐连接）；
+- `provider.mjs` 加 `safeFetch`：把 `Failed to fetch` 翻成"发不出去 → 具体 URL + 可能原因
+  （file:// 打不开代理 / 请求体 ~N KB / 端点没开跨域）"；
+- 双击打开的单文件版（`file://`）+ 默认 `/api/chat` → **提前**给出明确指引，不等浏览器报错；
+- **粘性降级**：端点拒绝图片输入后记住它（`visionFallback` → `visionBlocked`），此后不再重复上传那 ~1MB。
+
+实测：1.13MB 请求体 → **HTTP 200**（修复前在 512KB 处断连）；12.9MB → 413 + 中文提示。
+
+回归测试：`test-dom-smoke.mjs`「setBackgroundImage：把图设为背景（不占布局），撤销精确复原」；
+`test-app-wiring.mjs`「贴图 + '把这张图当这一页的背景' → 设成 background-image，不插入元素」、
+「模型不支持图片输入时：记住它，之后不再重复上传那 ~1MB」；
+`test-bundle.mjs`「本地代理的请求体上限必须放得下图片（防 Failed to fetch 回归）」。
+
 ---
 
 ## 第五轮（develop1）：R6 交互隔离 —— 指代器开启时页面必须"冻住"
@@ -461,12 +502,12 @@
 ```powershell
 node tools/test-naming.mjs       # 16 项  命名引擎（R1/R3.3）
 node tools/test-unit.mjs         # 32 项  patch 契约与护栏
-node tools/test-dom-smoke.mjs    # 31 项  真实 DOM 执行链路
-node tools/test-app-wiring.mjs   # 26 项  应用级接线（含 R1/R1.4/R3.3/R4.3/R5 + 工具条行为）
-node tools/test-bundle.mjs       # 12 项  产物结构 + 布局 + 接线契约
+node tools/test-dom-smoke.mjs    # 32 项  真实 DOM 执行链路
+node tools/test-app-wiring.mjs   # 28 项  应用级接线（含 R1/R1.4/R3.3/R4.3/R5 + 工具条行为）
+node tools/test-bundle.mjs       # 13 项  产物结构 + 布局 + 接线契约
 ```
 
-合计 **117 项全部通过**；页面内自检 **28 项**（顶栏「更多 ▾ → 🧪 页面内自检」）。
+合计 **121 项全部通过**；页面内自检 **28 项**（顶栏「更多 ▾ → 🧪 页面内自检」）。
 
 优化过程中被测试抓出的真问题（都已修）：
 1. `setAiming` 下发 `setMode` → 桥回发 `mode` 事件 → 又触发 `setAiming` → **无限 RPC 循环**（页面卡死）；

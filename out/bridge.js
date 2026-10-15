@@ -783,9 +783,16 @@ const MAX_CHANGES = 50;
 const MAX_HTML_BYTES = 60 * 1024;
 
 
-const OPS = ['setStyle', 'setText', 'setAttr', 'setHtml', 'insertHtml', 'insertImage', 'removeNode'];
+const OPS = ['setStyle', 'setText', 'setAttr', 'setHtml', 'insertHtml', 'insertImage', 'setBackgroundImage', 'removeNode'];
 
 const INSERT_POSITIONS = ['before', 'after', 'append', 'prepend'];
+/** 背景图的尺寸/位置/重复：只给有限几个安全值，避免模型塞进任意 CSS */
+
+const BG_SIZES = ['cover', 'contain', 'auto', '100% 100%', '100% auto', 'auto 100%'];
+
+const BG_POSITIONS = ['center', 'top', 'bottom', 'left', 'right', 'top left', 'top right', 'bottom left', 'bottom right', 'center center'];
+
+const BG_REPEATS = ['no-repeat', 'repeat', 'repeat-x', 'repeat-y'];
 
 /** can-edit 的 CSS 属性白名单：覆盖布局/排版/颜色/装饰/变换，杜绝 position:fixed 之类的越界破坏 */
 
@@ -976,6 +983,23 @@ function validatePatchShape(raw) {
         }
         break;
       }
+      case 'setBackgroundImage': {
+        // "把这张图当这一页的背景"：背景不是插入元素，而是给元素设 background-image。
+        // 模型同样只给 asset id，真实 data URL 由父窗口补。
+        const asset = String(change.asset ?? change.assetId ?? change.image ?? '').trim();
+        if (!asset) fail(`${at}.asset 必填（用 context.assets[].id 指定哪张图当背景）`, 'E_PATCH_SHAPE');
+        out.asset = asset;
+        const size = String(change.size ?? change['background-size'] ?? 'cover').toLowerCase().trim();
+        if (!BG_SIZES.includes(size)) fail(`${at}.size 只能是 ${BG_SIZES.join(' / ')}`, 'E_PATCH_SHAPE');
+        out.size = size;
+        const position = String(change.position ?? change['background-position'] ?? 'center').toLowerCase().trim();
+        if (!BG_POSITIONS.includes(position)) fail(`${at}.position 只能是 ${BG_POSITIONS.join(' / ')}`, 'E_PATCH_SHAPE');
+        out.position = position;
+        const repeat = String(change.repeat ?? change['background-repeat'] ?? 'no-repeat').toLowerCase().trim();
+        if (!BG_REPEATS.includes(repeat)) fail(`${at}.repeat 只能是 ${BG_REPEATS.join(' / ')}`, 'E_PATCH_SHAPE');
+        out.repeat = repeat;
+        break;
+      }
       case 'removeNode':
         break;
       default:
@@ -1035,6 +1059,8 @@ function summarizePatch(patch) {
         const where = { before: '前面', after: '后面', append: '内部末尾', prepend: '内部开头' }[c.position] ?? c.position;
         return `图片插到${where}`;
       }
+      case 'setBackgroundImage':
+        return '换成背景图';
       case 'removeNode':
         return '删除元素';
       default:
@@ -1063,6 +1089,9 @@ exports["MAX_CHANGES"] = exports["MAX_CHANGES"] ?? (typeof MAX_CHANGES !== 'unde
 exports["MAX_HTML_BYTES"] = exports["MAX_HTML_BYTES"] ?? (typeof MAX_HTML_BYTES !== 'undefined' ? MAX_HTML_BYTES : undefined);
 exports["OPS"] = exports["OPS"] ?? (typeof OPS !== 'undefined' ? OPS : undefined);
 exports["INSERT_POSITIONS"] = exports["INSERT_POSITIONS"] ?? (typeof INSERT_POSITIONS !== 'undefined' ? INSERT_POSITIONS : undefined);
+exports["BG_SIZES"] = exports["BG_SIZES"] ?? (typeof BG_SIZES !== 'undefined' ? BG_SIZES : undefined);
+exports["BG_POSITIONS"] = exports["BG_POSITIONS"] ?? (typeof BG_POSITIONS !== 'undefined' ? BG_POSITIONS : undefined);
+exports["BG_REPEATS"] = exports["BG_REPEATS"] ?? (typeof BG_REPEATS !== 'undefined' ? BG_REPEATS : undefined);
 exports["STYLE_WHITELIST"] = exports["STYLE_WHITELIST"] ?? (typeof STYLE_WHITELIST !== 'undefined' ? STYLE_WHITELIST : undefined);
 exports["ATTR_BLACKLIST"] = exports["ATTR_BLACKLIST"] ?? (typeof ATTR_BLACKLIST !== 'undefined' ? ATTR_BLACKLIST : undefined);
 exports["isForbiddenAttrName"] = exports["isForbiddenAttrName"] ?? (typeof isForbiddenAttrName !== 'undefined' ? isForbiddenAttrName : undefined);
@@ -1564,6 +1593,29 @@ function removeInsertedNodes(entry) {
 }
 
 /**
+ * 把模型给的 asset id 解析成真实图片（校验存在性与格式）。
+ * insertImage / setBackgroundImage 共用：**模型永远拿不到也写不出 base64**，
+ * 它只回答"用哪张"，真实 data URL 由父窗口通过 assets 传进来。
+ */
+
+function resolveAsset(assetId, assets) {
+  const id = String(assetId ?? '').trim();
+  const asset = id && assets ? assets[id] : null;
+  if (!asset?.dataUrl) {
+    const known = assets ? Object.keys(assets) : [];
+    throw new ZError(
+      `找不到图片资源 ${id || '(空)'}${known.length ? `，可用的是：${known.join(', ')}` : '（本次没有附带图片）'}`,
+      'E_PATCH_UNKNOWN_ASSET',
+      { asset: id, known },
+    );
+  }
+  if (!/^data:image\/(png|jpeg|jpg|gif|webp|bmp);base64,/i.test(String(asset.dataUrl))) {
+    throw new ZError(`图片资源 ${id} 不是合法的内嵌图片`, 'E_PATCH_BAD_ASSET', { asset: id });
+  }
+  return asset;
+}
+
+/**
  * 把 insertImage 归一成一条 insertHtml。
  *
  * 为什么要有一等公民的 insertImage：图片是"带资源"的插入，用户的需求（"把这张图放在标题下面"）
@@ -1577,19 +1629,7 @@ function removeInsertedNodes(entry) {
  */
 
 function normalizeInsertImage(change, assets, doc) {
-  const assetId = String(change.asset ?? '').trim();
-  const asset = assetId && assets ? assets[assetId] : null;
-  if (!asset?.dataUrl) {
-    const known = assets ? Object.keys(assets) : [];
-    throw new ZError(
-      `找不到图片资源 ${assetId || '(空)'}${known.length ? `，可用的是：${known.join(', ')}` : '（本次没有附带图片）'}`,
-      'E_PATCH_UNKNOWN_ASSET',
-      change,
-    );
-  }
-  if (!/^data:image\/(png|jpeg|jpg|gif|webp|bmp);base64,/i.test(String(asset.dataUrl))) {
-    throw new ZError(`图片资源 ${assetId} 不是合法的内嵌图片`, 'E_PATCH_BAD_ASSET', change);
-  }
+  const asset = resolveAsset(change.asset, assets);
 
   // 只保留白名单内的样式属性，避免模型借 style 绕过策略。
   // 注意这里用的是"插入图片"的收窄白名单：position / z-index / inset 之类会把图片从文档流里拽出来
@@ -1700,6 +1740,18 @@ function applyPatch(doc, scopeEl, rawPatch, options = {}) {
         else el.style.setProperty(change.prop, change.value, change.priority ?? '');
         applied.push(change);
         break;
+      case 'setBackgroundImage': {
+        // "把这张图当这一页的背景"：背景不是插入元素，而是给元素设 background-image。
+        // 仍由父窗口补真实 data URL；四个属性一次设好，撤销走 setStyle 的快照还原。
+        const asset = resolveAsset(change.asset, assets);
+        inverse.push(record(anchor, el, 'setStyle'));
+        el.style.setProperty('background-image', `url("${asset.dataUrl}")`);
+        el.style.setProperty('background-size', change.size ?? 'cover');
+        el.style.setProperty('background-position', change.position ?? 'center');
+        el.style.setProperty('background-repeat', change.repeat ?? 'no-repeat');
+        applied.push(change);
+        break;
+      }
       case 'setHtml':
         inverse.push(record(anchor, el, 'setHtml'));
         el.innerHTML = sanitizeHtmlFragment(doc, change.html);
@@ -1921,6 +1973,7 @@ exports["patchStats"] = exports["patchStats"] ?? (typeof patchStats !== 'undefin
 exports["isEditorArtifactAttr"] = exports["isEditorArtifactAttr"] ?? (typeof isEditorArtifactAttr !== 'undefined' ? isEditorArtifactAttr : undefined);
 exports["sanitizeHtmlFragment"] = exports["sanitizeHtmlFragment"] ?? (typeof sanitizeHtmlFragment !== 'undefined' ? sanitizeHtmlFragment : undefined);
 exports["scrubEditorArtifacts"] = exports["scrubEditorArtifacts"] ?? (typeof scrubEditorArtifacts !== 'undefined' ? scrubEditorArtifacts : undefined);
+exports["resolveAsset"] = exports["resolveAsset"] ?? (typeof resolveAsset !== 'undefined' ? resolveAsset : undefined);
 exports["normalizeInsertImage"] = exports["normalizeInsertImage"] ?? (typeof normalizeInsertImage !== 'undefined' ? normalizeInsertImage : undefined);
 exports["applyPatch"] = exports["applyPatch"] ?? (typeof applyPatch !== 'undefined' ? applyPatch : undefined);
 exports["undoPatch"] = exports["undoPatch"] ?? (typeof undoPatch !== 'undefined' ? undoPatch : undefined);

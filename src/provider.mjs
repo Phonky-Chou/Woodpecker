@@ -119,10 +119,23 @@ export function mockPatch(context) {
   const changes = [];
   const notes = [];
 
-  // 0) 带图 + 说位置：离线也要能演示"图片插到哪"
+  // 0) 带图 + 说位置：离线也要能演示"图片插到哪 / 当背景"
   //    位置判断直接照自然语言里的方位词，和给真实模型的规则保持一致
   const assets = Array.isArray(context?.assets) ? context.assets.filter((a) => a?.id) : [];
   if (assets.length && /(图|图片|照片|截图|logo|配图|插画|海报)/i.test(req)) {
+    // "当背景"和"插入图片"是两件事：背景用 setBackgroundImage，不占布局
+    if (/(背景|底图|垫在|铺在|铺满|铺底|做底)/.test(req)) {
+      const size = /(铺满|填满|cover)/.test(req) ? 'cover' : /(完整|contain)/.test(req) ? 'contain' : 'cover';
+      const position = /(顶部|上边)/.test(req) ? 'top' : /(底部|下边)/.test(req) ? 'bottom' : 'center';
+      changes.push({ op: 'setBackgroundImage', target: pid, asset: assets[0].id, size, position, repeat: 'no-repeat' });
+      notes.push('换成背景图');
+      return {
+        version: 1,
+        target: pid,
+        summary: `把图片${assets[0].name ? `「${assets[0].name}」` : ''}设为「${target.humanName ?? '选中元素'}」的背景（${size} / ${position}），内容仍在图之上`,
+        changes,
+      };
+    }
     const pos = /(前面|上方|上面|之前|顶部|最上)/.test(req)
       ? 'before'
       : /(开头|最前|内部最前)/.test(req)
@@ -282,6 +295,31 @@ export function mockPatch(context) {
 
 /* ============================== HTTP Provider ============================== */
 
+/**
+ * 包一层 fetch：把浏览器那句没营养的 "Failed to fetch" 变成能诊断的信息。
+ * 真踩过：用户贴了 668KB 的图 → base64 后请求体 ~1MB → 本地代理当时上限 512KB，
+ * 连接被掐断，界面上只有 "Failed to fetch"，完全看不出是"请求体过大"。
+ */
+async function safeFetch(url, init, { label = '模型接口' } = {}) {
+  const bodyKb = init?.body ? Math.round(String(init.body).length / 1024) : 0;
+  try {
+    return await fetch(url, init);
+  } catch (err) {
+    const hints = [];
+    const proto = typeof location !== 'undefined' ? location.protocol : '';
+    if (proto === 'file:' && !/^https?:/i.test(url)) {
+      hints.push('你现在是双击打开的单文件版（file://），它访问不到本地代理 / 相对路径接口；请用 node tools/serve.mjs 打开 http://127.0.0.1:5188，或在设置里填完整接口地址');
+    }
+    if (bodyKb > 256) hints.push(`本次请求体约 ${bodyKb} KB（带了图片），个别网关会直接拒绝大 body`);
+    hints.push('端点没开跨域 / 本地服务没启动 / 网络不通');
+    throw new ZError(
+      `${label}请求发不出去（Failed to fetch）→ ${url}。可能原因：${hints.join('；')}`,
+      'E_FETCH_FAILED',
+      { url, bodyKb, cause: String(err?.message ?? err) },
+    );
+  }
+}
+
 async function callOpenAiCompatible({ endpoint, apiKey, model, messages, signal, temperature = 0.2, jsonMode = true }) {
   const url = endpoint.replace(/\/+$/, '') + '/chat/completions';
   const body = {
@@ -294,15 +332,19 @@ async function callOpenAiCompatible({ endpoint, apiKey, model, messages, signal,
   if (jsonMode) body.response_format = { type: 'json_object' };
 
   const send = async (payload) =>
-    fetch(url, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
+    safeFetch(
+      url,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
+        },
+        body: JSON.stringify(payload),
+        signal,
       },
-      body: JSON.stringify(payload),
-      signal,
-    });
+      { label: '模型接口' },
+    );
 
   let res = await send(body);
   let text = await res.text();
@@ -355,6 +397,7 @@ async function generateViaChat({ context, callChat, onDelta, assets }) {
   ];
   onDelta?.(userContent === buildUserInstruction(context) ? '正在请求模型…' : '正在请求模型（附带图片）…');
   let first;
+  let visionFallback = false;
   try {
     first = await callChat(messages);
   } catch (err) {
@@ -362,6 +405,7 @@ async function generateViaChat({ context, callChat, onDelta, assets }) {
     // 这样"贴了图但模型不支持看图"不会变成用户的死路 —— 位置判断本来也能只靠文字完成。
     if (Array.isArray(userContent) && /image|content|vision|multimodal|400|invalid/i.test(String(err?.message ?? ''))) {
       onDelta?.('该模型不接受图片输入，改为只发文字（图片插入位置仍按你的描述判断）…');
+      visionFallback = true;
       first = await callChat([
         { role: 'system', content: SYSTEM_PROMPT },
         { role: 'user', content: buildUserInstruction(context) },
@@ -372,7 +416,7 @@ async function generateViaChat({ context, callChat, onDelta, assets }) {
   }
   try {
     const { patch } = parseModelOutput(first.content, context);
-    return { raw: first.content, patch, usage: first.usage, attempts: 1, repaired: false };
+    return { raw: first.content, patch, usage: first.usage, attempts: 1, repaired: false, visionFallback };
   } catch (err) {
     onDelta?.('模型输出不合规，正在要求它自我修复…');
     const repair = [
@@ -382,7 +426,7 @@ async function generateViaChat({ context, callChat, onDelta, assets }) {
     ];
     const second = await callChat(repair);
     const { patch } = parseModelOutput(second.content, context);
-    return { raw: second.content, patch, usage: second.usage, attempts: 2, repaired: true };
+    return { raw: second.content, patch, usage: second.usage, attempts: 2, repaired: true, visionFallback };
   }
 }
 
@@ -430,12 +474,23 @@ export function createProvider({ kind = PROVIDERS.MOCK, endpoint, apiKey, model 
       const started = Date.now();
       if (url.startsWith('/api/')) {
         onDelta?.('正在请求本地模型代理…');
-        const res = await fetch(url, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ context, model, assets: Array.isArray(assets) ? assets : [] }),
-          signal,
-        });
+        // 双击打开的单文件版（file://）访问不到 /api/xxx：提前说清楚，别让用户只看到 Failed to fetch
+        if (typeof location !== 'undefined' && location.protocol === 'file:') {
+          throw new ZError(
+            '当前是双击打开的单文件版（file://），无法访问本地代理 /api/chat。请用 node tools/serve.mjs 打开 http://127.0.0.1:5188 使用；或把设置里的接口地址填成完整的 https://…（配 key 直连）。',
+            'E_FILE_PROTOCOL',
+          );
+        }
+        const res = await safeFetch(
+          url,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ context, model, assets: Array.isArray(assets) ? assets : [] }),
+            signal,
+          },
+          { label: '本地代理' },
+        );
         const text = await res.text();
         if (!res.ok) throw new ZError(`本地代理 ${res.status}：${text.slice(0, 300)}`, 'E_PROXY_HTTP', { status: res.status });
         let data;

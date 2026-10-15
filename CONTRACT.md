@@ -151,8 +151,31 @@
 - 支持的图片格式：png / jpeg / gif / webp / bmp（`data:image/<这些>;base64,`）。
   父窗口会把长边压到 ≤1600px、单张压到 ≤800KB（图片要内嵌进 HTML 并随版本快照进 localStorage）。
 - **视觉**：`provider.generate(context, { assets })` 会把 data URL 作为 OpenAI 兼容的
-  `image_url` 内容块发给模型（可在输入区关掉）。端点不支持多模态时会**自动退回纯文字重试一次** ——
-  位置决策只靠自然语言本来就能完成，所以"模型不支持看图"不会变成用户的死路。
+  `image_url` 内容块发给模型（可在输入区关掉）。端点不支持多模态时会**自动退回纯文字重试一次**，
+  并在返回值里带 `visionFallback: true` —— 父窗口据此记住"这个模型不吃图"，之后不再重复上传
+  （一张图 base64 就是 ~1MB，反复上传既慢又容易被网关拒掉；位置决策只靠自然语言本来就能完成）。
+
+### 4.2 背景图：`setBackgroundImage`
+
+"把这张图当背景"与"插入图片"是两件事：前者设 `background-image`（铺在内容之下、不占布局），
+后者插入 `<img>`（参与布局）。别让模型用 `insertImage` 去做背景。
+
+```jsonc
+{ "op": "setBackgroundImage", "target": "<pid>", "asset": "a1",
+  "size": "cover", "position": "center", "repeat": "no-repeat" }
+```
+
+- `asset` 必填，校验同 `insertImage`（`E_PATCH_UNKNOWN_ASSET` / `E_PATCH_BAD_ASSET`）。
+- `size` / `position` / `repeat` 只接受**有限白名单**（`BG_SIZES` / `BG_POSITIONS` / `BG_REPEATS`），
+  默认 `cover` / `center` / `no-repeat`。越界取值 → `E_PATCH_SHAPE`。
+- 执行时设 `background-image: url("<dataUrl>")` + 上面三个属性；撤销走 `setStyle` 的快照还原，**逐字节复原**。
+- 常用于"图偏暗 + 深色文字"，所以提示词里明确鼓励**同时**加一条 `setStyle`（半透明遮罩 / 文字提亮）。
+
+### 4.3 本地代理的请求体上限
+
+图片是 base64 内嵌进请求体的（一张 668KB 的图 ≈ 891KB base64）。`tools/serve.mjs` 的
+`MAX_BODY` 必须留足余量（当前 **12MB**），超限时返回 **413 + 可操作提示**，
+**绝不能**直接掐断连接 —— 那样浏览器只会报一句 "Failed to fetch"，完全看不出原因（真踩过）。
 
 ## 5. patch 执行器与撤销
 

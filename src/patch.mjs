@@ -234,6 +234,28 @@ function removeInsertedNodes(entry) {
 }
 
 /**
+ * 把模型给的 asset id 解析成真实图片（校验存在性与格式）。
+ * insertImage / setBackgroundImage 共用：**模型永远拿不到也写不出 base64**，
+ * 它只回答"用哪张"，真实 data URL 由父窗口通过 assets 传进来。
+ */
+export function resolveAsset(assetId, assets) {
+  const id = String(assetId ?? '').trim();
+  const asset = id && assets ? assets[id] : null;
+  if (!asset?.dataUrl) {
+    const known = assets ? Object.keys(assets) : [];
+    throw new ZError(
+      `找不到图片资源 ${id || '(空)'}${known.length ? `，可用的是：${known.join(', ')}` : '（本次没有附带图片）'}`,
+      'E_PATCH_UNKNOWN_ASSET',
+      { asset: id, known },
+    );
+  }
+  if (!/^data:image\/(png|jpeg|jpg|gif|webp|bmp);base64,/i.test(String(asset.dataUrl))) {
+    throw new ZError(`图片资源 ${id} 不是合法的内嵌图片`, 'E_PATCH_BAD_ASSET', { asset: id });
+  }
+  return asset;
+}
+
+/**
  * 把 insertImage 归一成一条 insertHtml。
  *
  * 为什么要有一等公民的 insertImage：图片是"带资源"的插入，用户的需求（"把这张图放在标题下面"）
@@ -246,19 +268,7 @@ function removeInsertedNodes(entry) {
  * @param {Record<string, {dataUrl:string, name?:string, width?:number, height?:number}>} assets
  */
 export function normalizeInsertImage(change, assets, doc) {
-  const assetId = String(change.asset ?? '').trim();
-  const asset = assetId && assets ? assets[assetId] : null;
-  if (!asset?.dataUrl) {
-    const known = assets ? Object.keys(assets) : [];
-    throw new ZError(
-      `找不到图片资源 ${assetId || '(空)'}${known.length ? `，可用的是：${known.join(', ')}` : '（本次没有附带图片）'}`,
-      'E_PATCH_UNKNOWN_ASSET',
-      change,
-    );
-  }
-  if (!/^data:image\/(png|jpeg|jpg|gif|webp|bmp);base64,/i.test(String(asset.dataUrl))) {
-    throw new ZError(`图片资源 ${assetId} 不是合法的内嵌图片`, 'E_PATCH_BAD_ASSET', change);
-  }
+  const asset = resolveAsset(change.asset, assets);
 
   // 只保留白名单内的样式属性，避免模型借 style 绕过策略。
   // 注意这里用的是"插入图片"的收窄白名单：position / z-index / inset 之类会把图片从文档流里拽出来
@@ -368,6 +378,18 @@ export function applyPatch(doc, scopeEl, rawPatch, options = {}) {
         else el.style.setProperty(change.prop, change.value, change.priority ?? '');
         applied.push(change);
         break;
+      case 'setBackgroundImage': {
+        // "把这张图当这一页的背景"：背景不是插入元素，而是给元素设 background-image。
+        // 仍由父窗口补真实 data URL；四个属性一次设好，撤销走 setStyle 的快照还原。
+        const asset = resolveAsset(change.asset, assets);
+        inverse.push(record(anchor, el, 'setStyle'));
+        el.style.setProperty('background-image', `url("${asset.dataUrl}")`);
+        el.style.setProperty('background-size', change.size ?? 'cover');
+        el.style.setProperty('background-position', change.position ?? 'center');
+        el.style.setProperty('background-repeat', change.repeat ?? 'no-repeat');
+        applied.push(change);
+        break;
+      }
       case 'setHtml':
         inverse.push(record(anchor, el, 'setHtml'));
         el.innerHTML = sanitizeHtmlFragment(doc, change.html);

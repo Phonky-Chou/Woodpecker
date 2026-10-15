@@ -67,19 +67,34 @@ node tools/serve.mjs                 # 打开 http://127.0.0.1:5188
   | "图片放在**最上面**" | 插到选中区域的**内部开头** |
   | "放到这张**卡片里面**" | 插到那张卡片的**内部末尾** |
   | "插在这段文字**前面**" | 插到那段文字的**前一个兄弟**位置 |
+  | "把这张图**当背景** / 做底图 / 铺满这一块" | **设为选中区块的背景**（`background-image` + cover/center），**不插入元素、不挤走内容**，还会顺手加半透明遮罩保证文字可读 |
   | 没说位置 | 默认放进**选中元素内部末尾**，并在 summary 里说明放在哪了 |
 
+- **"插入图片"和"当背景"是两回事**：前者插入一个 `<img>`（参与布局），后者设 `background-image`（铺在内容之下）。
+  两种都由 AI 按你的说法自己选，不需要你记 op 名字。
 - **规矩**：图片只能落在你选中的那块范围里（越界会被拒并自动纠正）；图片本体由编辑器补上
   （AI 只回答"用哪张、放哪里"，不会去碰 base64）。
-- **内嵌进页面**：插入的图片是 `data:image/png;base64,…`，所以单文件导出后**能直接分享**、不依赖图床。
+- **内嵌进页面**：插入/设为背景的图片都是 `data:image/png;base64,…`，所以单文件导出后**能直接分享**、不依赖图床。
   大图会自动压到长边 ≤1600px、单张 ≤800KB（因为每次"接受"都会存一份版本快照）。
 - **看图**：默认把图片一起发给模型（需要**视觉模型**）。端点/模型不支持多模态时会**自动退回纯文字**重试，
-  位置判断照常进行 —— 实测 `deepseek-ai/DeepSeek-V4-Flash` 就是这种；想让它真的"看图"，
-  换一个视觉模型（例如 SiliconFlow 上的 `Qwen/Qwen2.5-VL-72B-Instruct` 之类）。
+  位置判断照常进行；**并且会记住这件事**，之后不再重复上传那 ~1MB。
+  实测 `deepseek-ai/DeepSeek-V4-Flash` 就是这种（只发文字，位置判断依然正确）；
+  想让它真的"看图"，换一个视觉模型（例如 SiliconFlow 上的 `Qwen/Qwen2.5-VL-72B-Instruct` 之类）。
   输入区的 **☑ 让模型看图** 可以随时关掉。
 
-> 真机实测（SiliconFlow + `deepseek-ai/DeepSeek-V4-Flash`）：三种说法给出的位置**全部正确** ——
-> "标题下面"→`after`、"最上面"→`prepend`、"卡片里面"→`append`，并且都真的插进了 DOM。
+### 贴图后报 "Failed to fetch" 怎么办
+
+`Failed to fetch` 是浏览器在说"请求根本没发出去"，通常是这三类原因（界面现在会把它们说出来）：
+
+| 原因 | 表现 | 怎么办 |
+| --- | --- | --- |
+| **双击打开的单文件版（file://）访问不到本地代理** | 设置里选"服务端模型"、地址是默认 `/api/chat` | 用 `node tools/serve.mjs` 打开 **http://127.0.0.1:5188**；或在设置里填**完整**的 `https://…` 地址 + key 直连 |
+| **请求体过大** | 图比较大时必现（图片以 base64 内嵌在请求体里） | 已修：本地代理上限从 512KB 提到 **12MB**，超限回 413 并给提示（不再是含糊的 Failed to fetch） |
+| **端点没开跨域 / 网络不通** | 直连模式（浏览器直接请求模型接口） | 用本地代理模式（推荐），或换支持跨域的端点 |
+
+> 真机实测（SiliconFlow + `deepseek-ai/DeepSeek-V4-Flash`）：
+> "标题下面"→`after`、"最上面"→`prepend`、"卡片里面"→`append`、"当这一页的背景"→`setBackgroundImage(cover/center)`
+> —— 位置判断**全部正确**，并且都真的落进了 DOM。
 
 ---
 
@@ -203,8 +218,8 @@ zhidaiqi/
 │   ├── serve.mjs                  开发服务 + 真实模型代理 /api/chat
 │   ├── test-naming.mjs            16 项命名引擎测试
 │   ├── test-unit.mjs              32 项纯逻辑单测
-│   ├── test-dom-smoke.mjs         31 项最小 DOM 真实链路烟测
-│   ├── test-app-wiring.mjs        26 项应用级接线测试（在 Node 里跑真正的 EditorApp）
+│   ├── test-dom-smoke.mjs         32 项最小 DOM 真实链路烟测
+│   ├── test-app-wiring.mjs        28 项应用级接线测试（在 Node 里跑真正的 EditorApp）
 │   ├── test-bundle.mjs            12 项打包产物 + 接线契约校验
 │   ├── dom-shim.mjs               测试用的极小 DOM（含 iframe realm，不进产物）
 │   └── test-e2e.mjs               可选：真浏览器端到端（需要能起浏览器）
@@ -221,13 +236,13 @@ node tools/build.mjs            # 生成 out/zhidaiqi.html
 node tools/build.mjs --watch    # 改源码自动重新构建
 node tools/test-naming.mjs      # 16 项 命名引擎（人话名 / 图标 / 快捷词）
 node tools/test-unit.mjs        # 32 项纯逻辑
-node tools/test-dom-smoke.mjs   # 31 项真实 DOM 链路
-node tools/test-app-wiring.mjs  # 26 项应用级接线（真跑 EditorApp + iframe realm）
-node tools/test-bundle.mjs      # 12 项打包产物 + 接线契约
+node tools/test-dom-smoke.mjs   # 32 项真实 DOM 链路
+node tools/test-app-wiring.mjs  # 28 项应用级接线（真跑 EditorApp + iframe realm）
+node tools/test-bundle.mjs      # 13 项打包产物 + 接线契约
 node tools/serve.mjs            # 开发服务（含真实模型代理）
 ```
 
-合计 **117 项**。页面内自检另有 **28 项**（顶栏「更多 ▾ → 🧪 页面内自检」）。
+合计 **121 项**。页面内自检另有 **28 项**（顶栏「更多 ▾ → 🧪 页面内自检」）。
 
 ## 快捷键
 
@@ -245,7 +260,7 @@ node tools/serve.mjs            # 开发服务（含真实模型代理）
 
 - **像素级渲染与真实 CSS 级联只能在浏览器里证明。** 开发环境的进程沙箱不允许起浏览器，
   所以自动化的真浏览器端到端（`tools/test-e2e.mjs`）在本机没能跑通；替代方案是
-  **页面内自检**（更多 ▾ → 🧪 页面内自检，27 项）+ Node 里的最小 DOM 真实链路烟测（26 项）+ 应用级接线测试（26 项）。
+  **页面内自检**（更多 ▾ → 🧪 页面内自检，27 项）+ Node 里的最小 DOM 真实链路烟测（26 项）+ 应用级接线测试（28 项）。
   前者请在浏览器里点一下确认，那是最有说服力的一次验收。
 - **app ↔ bridge 的接线正确性由契约测试保证**（`test-bundle.mjs` 会检查 `app.mjs` 调用的每个
   `rpc('op')` 是否真的存在于桥的能力表）。这类错误在纯 Node 测试里不可见——

@@ -130,6 +130,8 @@ export class EditorApp {
     this.assets = [];
     this.assetSeq = 0;
     this.visionSend = true; // 默认也把图发给模型（视觉模型能"看图"），可在输入区关掉
+    // 端点明确拒绝图片输入后就记住，别每次再传 ~1MB（位置判断只靠文字也能做）
+    this.visionBlocked = false;
 
     this.buildShell();
     this.wireStore();
@@ -956,13 +958,24 @@ export class EditorApp {
     this.panelChat.setBusy(true, `正在读取 ${this.selection.label} 的样式与结构…`);
 
     try {
+      const useVision = this.visionSend && !this.visionBlocked;
       let context = await this.rpc('getContext', { request, history: this.history.slice(-6), assets: this.assetMeta() });
       this.panelChat.setBusy(true, `正在读取 ${this.selection.name ?? this.selection.label} 的样式与结构…`);
       let result = await this.provider.generate(context, {
         onDelta: (hint) => this.panelChat.setBusy(true, hint),
-        assets: this.visionSend ? this.assets : [],
+        assets: useVision ? this.assets : [],
       });
       this.panelChat.setBusy(false);
+      // 这个模型/端点不接受图片输入 → 记住它，之后不再上传（一张图 base64 就是 ~1MB，
+      // 反复上传既慢又容易被网关拒掉；位置判断本来只靠文字就能完成）
+      if (result.visionFallback && !this.visionBlocked) {
+        this.visionBlocked = true;
+        this.panelChat.addMessage(
+          'sys',
+          '这个模型不接受图片输入，后续不再把图片发给它（插入位置/背景仍按你的描述判断）。\n' +
+            '想让模型真的"看图"，请在 模型设置 里换一个视觉模型。',
+        );
+      }
       // 第 1 步的验收要求：先能在控制台看到结构化输出
       console.log('[zhidaiqi] 模型返回原文：\n', result.raw);
       console.log('[zhidaiqi] 解析后的 Patch v1：', result.patch);
@@ -1000,8 +1013,9 @@ export class EditorApp {
           });
           result = await this.provider.generate(context, {
             onDelta: (hint) => this.panelChat.setBusy(true, hint),
-            assets: this.visionSend ? this.assets : [],
+            assets: this.visionSend && !this.visionBlocked ? this.assets : [],
           });
+          if (result.visionFallback) this.visionBlocked = true;
           this.panelChat.setBusy(false);
           console.log('[zhidaiqi] 被拒后重试返回：', result.patch);
         }
