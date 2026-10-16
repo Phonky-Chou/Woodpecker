@@ -13,6 +13,7 @@
 
 > ### 📖 第一次用请先看 → **[使用教程.md](使用教程.md)**
 > 面向使用者（含：怎么打开、怎么改一处、怎么贴图让 AI 判断位置、怎么改自己的网页、出问题怎么排查、**怎么反馈问题**）。
+> **要重做界面请先看 → [docs/前端重设计-答复.md](docs/前端重设计-答复.md)**（契约/护栏/可改范围的逐条答复）。
 > 本 README 偏工程实现；界面语言优化（R1–R7）的映射见 [docs/UI-OPTIMIZATION.md](docs/UI-OPTIMIZATION.md)。
 
 ---
@@ -220,7 +221,7 @@ zhidaiqi/
 │   ├── serve.mjs                  开发服务 + 真实模型代理 /api/chat
 │   ├── test-naming.mjs            16 项命名引擎测试
 │   ├── test-unit.mjs              32 项纯逻辑单测
-│   ├── test-dom-smoke.mjs         32 项最小 DOM 真实链路烟测
+│   ├── test-dom-smoke.mjs         34 项最小 DOM 真实链路烟测
 │   ├── test-app-wiring.mjs        28 项应用级接线测试（在 Node 里跑真正的 EditorApp）
 │   ├── test-bundle.mjs            12 项打包产物 + 接线契约校验
 │   ├── dom-shim.mjs               测试用的极小 DOM（含 iframe realm，不进产物）
@@ -238,13 +239,13 @@ node tools/build.mjs            # 生成 out/zhidaiqi.html
 node tools/build.mjs --watch    # 改源码自动重新构建
 node tools/test-naming.mjs      # 16 项 命名引擎（人话名 / 图标 / 快捷词）
 node tools/test-unit.mjs        # 32 项纯逻辑
-node tools/test-dom-smoke.mjs   # 32 项真实 DOM 链路
+node tools/test-dom-smoke.mjs   # 34 项真实 DOM 链路
 node tools/test-app-wiring.mjs  # 28 项应用级接线（真跑 EditorApp + iframe realm）
 node tools/test-bundle.mjs      # 13 项打包产物 + 接线契约
 node tools/serve.mjs            # 开发服务（含真实模型代理）
 ```
 
-合计 **121 项**。页面内自检另有 **28 项**（顶栏「更多 ▾ → 🧪 页面内自检」）。
+合计 **123 项**。页面内自检另有 **28 项**（顶栏「更多 ▾ → 🧪 页面内自检」）。
 
 ## 快捷键
 

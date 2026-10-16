@@ -116,7 +116,26 @@ function runScriptInRealm(win, code) {
 
 class ClassList {
   constructor(el) { this.el = el; this.set = new Set(); }
-  _sync() { this.el._class = [...this.set].join(' '); }
+  /**
+   * 同步到 el._class **并且写回 class 属性**。
+   * 浏览器里 classList 与 class 属性是同一份数据；只改 _class 会造成假象 ——
+   * getAttribute('class') 与 outerHTML 都看不到 classList 的改动。
+   * 真踩过：核查"导出是否剥掉 z-picking"时被这个假象掩盖，而真实浏览器里
+   * `<html class="z-picking">` 是会漏进导出产物的。
+   */
+  _sync() {
+    const v = [...this.set].join(' ');
+    this.el._class = v;
+    if (v) this.el.attrs.set('class', v);
+    else this.el.attrs.delete('class');
+    const rec = this.el.attributes.find((a) => a.name === 'class');
+    if (v) {
+      if (rec) rec.value = v;
+      else this.el.attributes.push({ name: 'class', value: v });
+    } else if (rec) {
+      this.el.attributes.splice(this.el.attributes.indexOf(rec), 1);
+    }
+  }
   add(...cs) { cs.forEach((c) => this.set.add(c)); this._sync(); }
   remove(...cs) { cs.forEach((c) => this.set.delete(c)); this._sync(); }
   contains(c) { return this.set.has(c); }

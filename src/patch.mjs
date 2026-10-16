@@ -31,11 +31,25 @@ const INSERT_IMAGE_STYLE_OK = new Set([
   'background', 'background-color', 'mix-blend-mode', 'vertical-align', 'box-sizing',
 ]);
 
-/** 判断某个属性名是否属于"编辑器自身"（高亮/预览标记），导出与快照前会剥掉。 */
+/**
+ * 判断某个属性名是否属于"编辑器自身"（高亮/预览标记），导出与快照前会剥掉。
+ * 由 `scrubEditorArtifacts` 使用 —— 只有一处真相，别再写第二份前缀判断。
+ */
 export function isEditorArtifactAttr(name) {
   const n = String(name ?? '').toLowerCase();
-  return n.startsWith('data-z-') || n === 'data-pid' || n === 'contenteditable';
+  return n.startsWith('data-z-') || n === 'data-pid';
 }
+
+/**
+ * 编辑器加到**用户页面元素**上的类名（导出 / 入快照前必须剥掉）。
+ *
+ * 必须用**显式清单**，不能笼统剥 `z-*`：用户页面完全可能自己用 `z-10`（Tailwind 的 z-index）
+ * 之类的类名，笼统剥会把用户的页面改坏。
+ *
+ * 真踩过：`z-picking` 加在 `<html>` 上（指代器开着时），原先只剥了另外三个类，
+ * 于是导出产物和每个版本快照里都带着 `<html class="z-picking">`。
+ */
+export const EDITOR_CLASSES = ['z-picking', 'picker-selected', 'z-preview-flash', 'z-ai-touched'];
 
 /**
  * 清洗模型给的 HTML 片段：去掉脚本、内联事件、危险 URL。
@@ -69,6 +83,16 @@ export function sanitizeHtmlFragment(doc, html) {
           continue;
         }
         if (name === 'style' && /javascript\s*:|expression\s*\(/i.test(value)) child.removeAttribute(attr.name);
+        if (name === 'style') {
+          // 掐掉 position:fixed / sticky：这类元素会**脱离文档流盖住整页**，
+          // 也就是"AI 往选区之外塞东西"（审查报告 M2 指出的视觉越界）。
+          // 只删这一条声明，其余样式（尺寸/间距/圆角…）照旧保留。
+          const cleaned = value.replace(/(?:^|;)\s*position\s*:\s*(?:fixed|sticky)\b[^;]*/gi, '').replace(/^;+|;+$/g, '');
+          if (cleaned !== value.trim() && cleaned !== value) {
+            if (cleaned) child.setAttribute('style', cleaned);
+            else child.removeAttribute('style');
+          }
+        }
         if (name === PID_ATTR) child.removeAttribute(attr.name); // 由锚点管理器重新分配
       }
       walk(child);
@@ -102,6 +126,11 @@ function snapshotTree(anchor, el) {
     html: el.innerHTML,
     outer: el.outerHTML,
     attrs,
+    // 属性的**顺序**也要存：浏览器不保证属性顺序稳定，而"取消后逐字节还原"是产品承诺。
+    // 只存 key-value 映射的话，还原时 pid 会被追加到最后（`<p class="y" data-pid="…">`），
+    // 与原串 `<p data-pid="…" class="y">` 不同 —— 真实审查报告里把这条记为"未修"，
+    // 现在按顺序列表原样重建。pid 也放进来，因为它本来就是原串的一部分。
+    attrList: [...el.attributes].map((a) => ({ name: a.name, value: a.value })),
     style: el.hasAttribute('style') ? el.getAttribute('style') : null,
   };
 }
@@ -137,11 +166,10 @@ export function scrubEditorArtifacts(clone, doctypeName = 'html') {
       }
     }
     // 3) 锚点、编辑器私有属性、预览/选中类
-    if (el.hasAttribute('data-pid')) el.removeAttribute('data-pid');
     for (const attr of [...(el.attributes ?? [])]) {
-      if (attr.name.startsWith('data-z-')) el.removeAttribute(attr.name);
+      if (isEditorArtifactAttr(attr.name)) el.removeAttribute(attr.name);
     }
-    if (typeof el.className === 'string') el.classList.remove('picker-selected', 'z-preview-flash', 'z-ai-touched');
+    if (typeof el.className === 'string') el.classList.remove(...EDITOR_CLASSES);
   }
   const doctype = doctypeName ? `<!DOCTYPE ${doctypeName}>\n` : '<!DOCTYPE html>\n';
   return doctype + clone.outerHTML;
@@ -162,7 +190,19 @@ function restoreElement(anchor, el, snap) {
   el.innerHTML = snap.html ?? '';
   for (const stale of el.querySelectorAll(`[${PID_ATTR}]`)) stale.removeAttribute(PID_ATTR);
   if (el.hasAttribute(PID_ATTR)) el.removeAttribute(PID_ATTR);
-  if (snap.attrs) {
+  if (snap.attrList) {
+    // 按**快照里的原始顺序**重建属性：浏览器不保证属性顺序稳定，而"取消后逐字节还原"是产品承诺。
+    // 只按 key-value 映射 setAttribute 的话，pid 会被追加到末尾（`<p class="y" data-pid="…">`），
+    // 与原来的 `<p data-pid="…" class="y">` 不同 —— 审查报告把这条记为"未修"，现在修掉。
+    for (const name of [...el.attributes].map((a) => a.name)) el.removeAttribute(name);
+    for (const { name, value } of snap.attrList) {
+      if (name === 'style') continue; // style 走下面统一的处理（shim 与浏览器里它与样式表是一份数据）
+      el.setAttribute(name, value);
+    }
+    if (snap.style != null) el.setAttribute('style', snap.style);
+    else el.removeAttribute('style');
+  } else if (snap.attrs) {
+    // 兼容没有 attrList 的旧快照（导入的老工程）
     for (const name of [...el.attributes].map((a) => a.name)) {
       if (name !== PID_ATTR && !(name in snap.attrs)) el.removeAttribute(name);
     }

@@ -23,7 +23,7 @@ const SRC = (f) => pathToFileURL(path.join(ROOT, 'src', f)).href;
 const { parseDocument } = loadDomShim();
 const { AnchorManager, selectorPath } = await import(SRC('anchor.mjs'));
 const { Picker } = await import(SRC('picker.mjs'));
-const { applyPatch, undoPatch, sanitizeHtmlFragment, scrubEditorArtifacts } = await import(SRC('patch.mjs'));
+const { applyPatch, undoPatch, sanitizeHtmlFragment, scrubEditorArtifacts, EDITOR_CLASSES } = await import(SRC('patch.mjs'));
 const { buildContext } = await import(SRC('selector.mjs'));
 const { mockPatch } = await import(SRC('provider.mjs'));
 const { validatePatch } = await import(SRC('schema.mjs'));
@@ -776,6 +776,50 @@ test('setBackgroundImage：把图设为背景（不占布局），撤销精确�
     (err) => err.code === 'E_PATCH_BAD_ASSET',
   );
   assert.equal(section.getAttribute('style'), beforeStyle, '被拒时不允许留下任何改动');
+});
+
+test('导出必须剥掉编辑器加的类（含 <html> 上的 z-picking），但不能误删用户自己的类', () => {
+  // 真踩过：指代器开着时 `<html class="z-picking">`，scrubEditorArtifacts 只剥了另外三个类，
+  // 于是导出产物和每个版本快照里都带着它（用户拿到的 HTML 被污染）。
+  const { document } = fresh();
+  document.documentElement.classList.add('z-picking');
+  const h1 = document.querySelector('.hero h1');
+  h1.classList.add('picker-selected', 'z-preview-flash', 'z-ai-touched');
+  // 用户自己的类名必须原样保留（尤其像 Tailwind 的 z-10 这种以 z- 开头的）
+  h1.classList.add('z-10', 'my-own-class');
+  const out = scrubEditorArtifacts(document.documentElement.cloneNode(true), 'html');
+  for (const cls of EDITOR_CLASSES) {
+    assert.ok(!new RegExp(`\\b${cls}\\b`).test(out), `编辑器类 ${cls} 必须被剥掉：${out.slice(0, 120)}`);
+  }
+  assert.ok(/\bz-10\b/.test(out), '用户自己的 z-10（Tailwind 风格）不能被误删');
+  assert.ok(/\bmy-own-class\b/.test(out), '用户自己的类名要保留');
+  assert.ok(!out.includes('data-pid='), 'pid 仍要剥掉');
+});
+
+test('插入的 HTML 不许用 position:fixed/sticky 逃离选区（其余样式照旧保留）', () => {
+  // 审查报告 M2 的视觉后果：AI 可以把内容插成选区的**兄弟**（"在这块旁边加东西"是有意允许的），
+  // 若再允许 position:fixed，就等于让它往选区外塞一个盖住整页的覆盖层 —— 高亮框里看不到变化，
+  // 屏幕上却多了东西。这里把这条声明掐掉，别的声明保留。
+  const { document, anchor } = fresh();
+  const cards = document.querySelector('.cards');
+  const pid = anchor.pidOf(cards);
+  applyPatch(document, cards, {
+    version: 1,
+    target: pid,
+    changes: [
+      {
+        op: 'insertHtml',
+        target: pid,
+        position: 'append',
+        html: '<div style="position: fixed; top: 0; left: 0; width: 100%; background: red; border-radius: 4px">浮层</div>',
+      },
+    ],
+  });
+  const inserted = cards.lastElementChild;
+  const style = inserted.getAttribute('style') ?? '';
+  assert.ok(!/position\s*:\s*(fixed|sticky)/i.test(style), `不许留下 fixed/sticky：${style}`);
+  assert.ok(/background\s*:\s*red/i.test(style), '其余声明要保留（别把整段 style 丢掉）');
+  assert.ok(/border-radius\s*:\s*4px/i.test(style), '其余声明要保留');
 });
 
 test('干净导出必须剥掉编辑器注入的 bootstrap 脚本', () => {

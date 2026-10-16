@@ -773,8 +773,7 @@ __Z_DEF("schema.mjs", function (exports, __Z_REQ) {
  *
  * 为什么把校验独立出来：模型输出的东西永远不能直接相信。
  * 校验通过才允许执行器靠近 DOM；校验失败整单拒绝，一个字符都不动。
- */
-const { ZError, assert } = __Z_REQ("util.mjs");
+ */const { ZError, assert } = __Z_REQ("util.mjs");
 
 const PATCH_VERSION = 1;
 
@@ -1366,10 +1365,7 @@ __Z_DEF("patch.mjs", function (exports, __Z_REQ) {
  *
  * 逆条目用"受影响子树快照"实现，而不是零碎地记旧值——因为一个 setText
  * 可能被另一个 setHtml 覆盖，零碎回滚顺序一错就还原不干净。
- */
-const { AnchorManager, PID_ATTR } = __Z_REQ("anchor.mjs");
-const { validatePatchShape, validatePatchScope, STYLE_WHITELIST } = __Z_REQ("schema.mjs");
-const { ZError, uid } = __Z_REQ("util.mjs");
+ */const { AnchorManager, PID_ATTR } = __Z_REQ("anchor.mjs");const { validatePatchShape, validatePatchScope, STYLE_WHITELIST } = __Z_REQ("schema.mjs");const { ZError, uid } = __Z_REQ("util.mjs");
 const DANGEROUS_TAGS = new Set(['SCRIPT', 'IFRAME', 'OBJECT', 'EMBED', 'LINK', 'META', 'BASE', 'FORM', 'STYLE']);
 const SAFE_URL = /^(?:https?:|mailto:|tel:|#|\/|\.\/|\.\.\/|data:image\/)/i;
 
@@ -1387,12 +1383,27 @@ const INSERT_IMAGE_STYLE_OK = new Set([
   'background', 'background-color', 'mix-blend-mode', 'vertical-align', 'box-sizing',
 ]);
 
-/** 判断某个属性名是否属于"编辑器自身"（高亮/预览标记），导出与快照前会剥掉。 */
+/**
+ * 判断某个属性名是否属于"编辑器自身"（高亮/预览标记），导出与快照前会剥掉。
+ * 由 `scrubEditorArtifacts` 使用 —— 只有一处真相，别再写第二份前缀判断。
+ */
 
 function isEditorArtifactAttr(name) {
   const n = String(name ?? '').toLowerCase();
-  return n.startsWith('data-z-') || n === 'data-pid' || n === 'contenteditable';
+  return n.startsWith('data-z-') || n === 'data-pid';
 }
+
+/**
+ * 编辑器加到**用户页面元素**上的类名（导出 / 入快照前必须剥掉）。
+ *
+ * 必须用**显式清单**，不能笼统剥 `z-*`：用户页面完全可能自己用 `z-10`（Tailwind 的 z-index）
+ * 之类的类名，笼统剥会把用户的页面改坏。
+ *
+ * 真踩过：`z-picking` 加在 `<html>` 上（指代器开着时），原先只剥了另外三个类，
+ * 于是导出产物和每个版本快照里都带着 `<html class="z-picking">`。
+ */
+
+const EDITOR_CLASSES = ['z-picking', 'picker-selected', 'z-preview-flash', 'z-ai-touched'];
 
 /**
  * 清洗模型给的 HTML 片段：去掉脚本、内联事件、危险 URL。
@@ -1427,6 +1438,16 @@ function sanitizeHtmlFragment(doc, html) {
           continue;
         }
         if (name === 'style' && /javascript\s*:|expression\s*\(/i.test(value)) child.removeAttribute(attr.name);
+        if (name === 'style') {
+          // 掐掉 position:fixed / sticky：这类元素会**脱离文档流盖住整页**，
+          // 也就是"AI 往选区之外塞东西"（审查报告 M2 指出的视觉越界）。
+          // 只删这一条声明，其余样式（尺寸/间距/圆角…）照旧保留。
+          const cleaned = value.replace(/(?:^|;)\s*position\s*:\s*(?:fixed|sticky)\b[^;]*/gi, '').replace(/^;+|;+$/g, '');
+          if (cleaned !== value.trim() && cleaned !== value) {
+            if (cleaned) child.setAttribute('style', cleaned);
+            else child.removeAttribute('style');
+          }
+        }
         if (name === PID_ATTR) child.removeAttribute(attr.name); // 由锚点管理器重新分配
       }
       walk(child);
@@ -1460,6 +1481,11 @@ function snapshotTree(anchor, el) {
     html: el.innerHTML,
     outer: el.outerHTML,
     attrs,
+    // 属性的**顺序**也要存：浏览器不保证属性顺序稳定，而"取消后逐字节还原"是产品承诺。
+    // 只存 key-value 映射的话，还原时 pid 会被追加到最后（`<p class="y" data-pid="…">`），
+    // 与原串 `<p data-pid="…" class="y">` 不同 —— 真实审查报告里把这条记为"未修"，
+    // 现在按顺序列表原样重建。pid 也放进来，因为它本来就是原串的一部分。
+    attrList: [...el.attributes].map((a) => ({ name: a.name, value: a.value })),
     style: el.hasAttribute('style') ? el.getAttribute('style') : null,
   };
 }
@@ -1496,11 +1522,10 @@ function scrubEditorArtifacts(clone, doctypeName = 'html') {
       }
     }
     // 3) 锚点、编辑器私有属性、预览/选中类
-    if (el.hasAttribute('data-pid')) el.removeAttribute('data-pid');
     for (const attr of [...(el.attributes ?? [])]) {
-      if (attr.name.startsWith('data-z-')) el.removeAttribute(attr.name);
+      if (isEditorArtifactAttr(attr.name)) el.removeAttribute(attr.name);
     }
-    if (typeof el.className === 'string') el.classList.remove('picker-selected', 'z-preview-flash', 'z-ai-touched');
+    if (typeof el.className === 'string') el.classList.remove(...EDITOR_CLASSES);
   }
   const doctype = doctypeName ? `<!DOCTYPE ${doctypeName}>\n` : '<!DOCTYPE html>\n';
   return doctype + clone.outerHTML;
@@ -1521,7 +1546,19 @@ function restoreElement(anchor, el, snap) {
   el.innerHTML = snap.html ?? '';
   for (const stale of el.querySelectorAll(`[${PID_ATTR}]`)) stale.removeAttribute(PID_ATTR);
   if (el.hasAttribute(PID_ATTR)) el.removeAttribute(PID_ATTR);
-  if (snap.attrs) {
+  if (snap.attrList) {
+    // 按**快照里的原始顺序**重建属性：浏览器不保证属性顺序稳定，而"取消后逐字节还原"是产品承诺。
+    // 只按 key-value 映射 setAttribute 的话，pid 会被追加到末尾（`<p class="y" data-pid="…">`），
+    // 与原来的 `<p data-pid="…" class="y">` 不同 —— 审查报告把这条记为"未修"，现在修掉。
+    for (const name of [...el.attributes].map((a) => a.name)) el.removeAttribute(name);
+    for (const { name, value } of snap.attrList) {
+      if (name === 'style') continue; // style 走下面统一的处理（shim 与浏览器里它与样式表是一份数据）
+      el.setAttribute(name, value);
+    }
+    if (snap.style != null) el.setAttribute('style', snap.style);
+    else el.removeAttribute('style');
+  } else if (snap.attrs) {
+    // 兼容没有 attrList 的旧快照（导入的老工程）
     for (const name of [...el.attributes].map((a) => a.name)) {
       if (name !== PID_ATTR && !(name in snap.attrs)) el.removeAttribute(name);
     }
@@ -1964,13 +2001,13 @@ function dryRunPatch(doc, scopeEl, patch) {
   const session = new PreviewSession(doc, scopeEl, patch);
   const ok = session.cancel();
   return { rolledBack: ok, applied: session.applied.length };
-}
-Object.assign(exports, {"validatePatch": __Z_REQ("schema.mjs")["validatePatch"], "summarizePatch": __Z_REQ("schema.mjs")["summarizePatch"], "patchStats": __Z_REQ("schema.mjs")["patchStats"]});
+}Object.assign(exports, {"validatePatch": __Z_REQ("schema.mjs")["validatePatch"], "summarizePatch": __Z_REQ("schema.mjs")["summarizePatch"], "patchStats": __Z_REQ("schema.mjs")["patchStats"]});
 
 exports["validatePatch"] = exports["validatePatch"] ?? (typeof validatePatch !== 'undefined' ? validatePatch : undefined);
 exports["summarizePatch"] = exports["summarizePatch"] ?? (typeof summarizePatch !== 'undefined' ? summarizePatch : undefined);
 exports["patchStats"] = exports["patchStats"] ?? (typeof patchStats !== 'undefined' ? patchStats : undefined);
 exports["isEditorArtifactAttr"] = exports["isEditorArtifactAttr"] ?? (typeof isEditorArtifactAttr !== 'undefined' ? isEditorArtifactAttr : undefined);
+exports["EDITOR_CLASSES"] = exports["EDITOR_CLASSES"] ?? (typeof EDITOR_CLASSES !== 'undefined' ? EDITOR_CLASSES : undefined);
 exports["sanitizeHtmlFragment"] = exports["sanitizeHtmlFragment"] ?? (typeof sanitizeHtmlFragment !== 'undefined' ? sanitizeHtmlFragment : undefined);
 exports["scrubEditorArtifacts"] = exports["scrubEditorArtifacts"] ?? (typeof scrubEditorArtifacts !== 'undefined' ? scrubEditorArtifacts : undefined);
 exports["resolveAsset"] = exports["resolveAsset"] ?? (typeof resolveAsset !== 'undefined' ? resolveAsset : undefined);
@@ -1989,10 +2026,7 @@ __Z_DEF("selector.mjs", function (exports, __Z_REQ) {
  * 关键取舍：不整页丢给模型。
  *  选中元素 outerHTML（截断） + 关键计算样式 + 命中的 CSS 规则 + 用户原话
  * 这样 token 小、指向明确，模型也很难"顺手改别处"。
- */
-const { truncateBytes } = __Z_REQ("util.mjs");
-const { describeElement } = __Z_REQ("naming.mjs");
-const { selectorPath } = __Z_REQ("anchor.mjs");
+ */const { truncateBytes } = __Z_REQ("util.mjs");const { describeElement } = __Z_REQ("naming.mjs");const { selectorPath } = __Z_REQ("anchor.mjs");
 /** 计算样式里真正影响"看起来怎样"的属性子集。 */
 
 const COMPUTED_KEYS = [
@@ -2196,8 +2230,7 @@ __Z_DEF("picker.mjs", function (exports, __Z_REQ) {
  *
  * 只上报事实（指向哪个 pid、矩形在哪、链有哪几段），不做任何 UI 决策。
  * 界面（高亮框、环绕泡泡）画在父窗口的覆盖层上，因此绝不往用户页面注入样式。
- */
-const { PID_ATTR, selectorPath } = __Z_REQ("anchor.mjs");
+ */const { PID_ATTR, selectorPath } = __Z_REQ("anchor.mjs");
 
 const MODES = { BROWSE: 'browse', PICK: 'pick' };
 
@@ -2565,14 +2598,7 @@ __Z_DEF("bridge.mjs", function (exports, __Z_REQ) {
  * 这样模型、UI、快照全都在父窗口，iframe 里没有一行"业务决策"。
  *
  * 消息形状：{ __z: 'req'|'res'|'evt', id, op?, args?, ok?, result?, error? }
- */
-const { AnchorManager, selectorPath } = __Z_REQ("anchor.mjs");
-const { Picker, MODES } = __Z_REQ("picker.mjs");
-const { applyPatch, undoPatch, sanitizeHtmlFragment, scrubEditorArtifacts } = __Z_REQ("patch.mjs");
-const { validatePatch } = __Z_REQ("schema.mjs");
-const { buildContext } = __Z_REQ("selector.mjs");
-const { describeElement } = __Z_REQ("naming.mjs");
-const { ZError, truncateBytes } = __Z_REQ("util.mjs");
+ */const { AnchorManager, selectorPath } = __Z_REQ("anchor.mjs");const { Picker, MODES } = __Z_REQ("picker.mjs");const { applyPatch, undoPatch, sanitizeHtmlFragment, scrubEditorArtifacts } = __Z_REQ("patch.mjs");const { validatePatch } = __Z_REQ("schema.mjs");const { buildContext } = __Z_REQ("selector.mjs");const { describeElement } = __Z_REQ("naming.mjs");const { ZError, truncateBytes } = __Z_REQ("util.mjs");
 const NS = 'zhidaiqi';
 
 /* ======================================================================

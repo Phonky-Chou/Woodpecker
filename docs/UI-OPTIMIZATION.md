@@ -357,6 +357,43 @@
 
 ---
 
+## 第七轮：为"前端重设计"做准备时修掉的 4 个问题
+
+另一个 Agent 要以设计师身份重做界面，先要一份"哪些是契约、哪些是护栏、哪些只是历史决定"的答复。
+为写这份答复做的逐条核实里，挖出并修掉了 4 个真问题（都不是视觉问题，但都影响重设计的可信度）：
+
+**① `z-picking` 类漏进每个快照与导出**（审查报告 L1，此前未修）
+指代器开着时（默认就是）给 iframe 的 `<html>` 挂 `z-picking`，而 `scrubEditorArtifacts` 的移除清单里
+只有 `picker-selected / z-preview-flash / z-ai-touched` → **每一份导出文件、每一个版本快照的根节点都带
+`class="z-picking"`**。修法：新增 `EDITOR_CLASSES` 显式清单并纳入清洗（`patch.mjs`）。
+**注意不能用"剥所有 `z-*`"**：用户页面完全可能自己用 Tailwind 的 `z-10` 之类，笼统剥会改坏用户的页面 ——
+回归测试里专门断言了 `z-10` / `my-own-class` 必须保留。
+
+**② "取消后逐字节还原"在属性顺序上不成立**（审查报告 M9，此前记为未修）
+`restoreElement` 只按 key-value 还原属性，pid 会被追加到末尾（`<p class="y" data-pid="…">`），
+与原来的 `<p data-pid="…" class="y">` 不同 → 字节级 diff 会看到差异，容易被误判成"样式改坏了"。
+修法：快照里增加**有序属性列表** `attrList`，还原时按原顺序重建（保留旧快照的兼容分支）。
+
+**③ 插入的 HTML 可以用 `position:fixed/sticky` 逃离选区**（审查报告 M2 的视觉后果）
+"在这块旁边加东西"是有意允许的（target=选中元素本身 + before/after），但若再允许 `position:fixed`，
+AI 就等于能往选区外塞一个盖住整页的覆盖层 —— 高亮框里看不到变化、屏幕上却多了东西。
+修法：`sanitizeHtmlFragment` 里**只删这一条声明**，其余样式照旧保留（有回归测试断言 `background` 与
+`border-radius` 不被误删）。
+
+**④ `isEditorArtifactAttr` 是死代码**（审查指出零调用点）
+清洗逻辑里另写了一份 `startsWith('data-z-')` 判断，"两处真相"很容易漏改。
+修法：让 `scrubEditorArtifacts` 真正使用该函数（并从它里面去掉 `contenteditable` —— 那不是编辑器产物，
+剥掉会改动用户内容），前缀规则收敛为单一真相。
+
+> 顺带修了 shim 的一个保真度问题：`classList.add()` 只改内部状态、**不写回 `class` 属性**，
+> 导致 `getAttribute('class')` 与 `outerHTML` 看不到 classList 的改动 —— 上面 ① 的核查一度被这个假象掩盖
+> （用真实链路复测才确认泄漏存在）。现在两向同步。
+
+**给重设计方的答复全文**：[前端重设计-答复.md](前端重设计-答复.md)（Q1–Q16 逐条，含三类文件清单、
+标识符改名安全网、契约 vs 护栏判定、可达状态全集、验收流程）。
+
+---
+
 ## 第五轮（develop1）：R6 交互隔离 —— 指代器开启时页面必须"冻住"
 
 **需求**：导入的 HTML 在指代器**关闭**时功能要正常；指代器**开启**后鼠标只属于指代器，
@@ -502,12 +539,12 @@
 ```powershell
 node tools/test-naming.mjs       # 16 项  命名引擎（R1/R3.3）
 node tools/test-unit.mjs         # 32 项  patch 契约与护栏
-node tools/test-dom-smoke.mjs    # 32 项  真实 DOM 执行链路
+node tools/test-dom-smoke.mjs    # 34 项  真实 DOM 执行链路
 node tools/test-app-wiring.mjs   # 28 项  应用级接线（含 R1/R1.4/R3.3/R4.3/R5 + 工具条行为）
 node tools/test-bundle.mjs       # 13 项  产物结构 + 布局 + 接线契约
 ```
 
-合计 **121 项全部通过**；页面内自检 **28 项**（顶栏「更多 ▾ → 🧪 页面内自检」）。
+合计 **123 项全部通过**；页面内自检 **28 项**（顶栏「更多 ▾ → 🧪 页面内自检」）。
 
 优化过程中被测试抓出的真问题（都已修）：
 1. `setAiming` 下发 `setMode` → 桥回发 `mode` 事件 → 又触发 `setAiming` → **无限 RPC 循环**（页面卡死）；
